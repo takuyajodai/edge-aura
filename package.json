@@ -1,0 +1,74 @@
+{
+  "name": "edge-aura",
+  "version": "0.1.0",
+  "description": "Siri-style organic screen-edge glow — framework-agnostic Canvas 2D engine with spring physics, plus a thin React adapter.",
+  "keywords": [
+    "siri",
+    "glow",
+    "aura",
+    "edge",
+    "border",
+    "canvas",
+    "ambient",
+    "animation",
+    "effect",
+    "react"
+  ],
+  "author": "Takuya Jodai (https://github.com/takuyajodai)",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/takuyajodai/edge-aura.git"
+  },
+  "homepage": "https://github.com/takuyajodai/edge-aura#readme",
+  "bugs": "https://github.com/takuyajodai/edge-aura/issues",
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./react": {
+      "types": "./dist/react.d.ts",
+      "default": "./dist/react.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsdown",
+    "typecheck": "tsc --noEmit",
+    "demo": "vite demo",
+    "demo:build": "vite build demo",
+    "prepublishOnly": "npm run typecheck && npm run build"
+  },
+  "peerDependencies": {
+    "react": ">=18"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.3.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "tsdown": "^0.12.0",
+    "typescript": "^5.8.0",
+    "vite": "^6.0.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
