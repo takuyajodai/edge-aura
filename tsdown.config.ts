@@ -7,8 +7,15 @@ export default defineConfig({
   },
   format: "esm",
   dts: true,
-  external: ["react", "react/jsx-runtime"],
+  clean: true,
+  deps: {
+    neverBundle: ["react", "react/jsx-runtime"],
+  },
+  // package.json declares ./dist/index.js + ./dist/index.d.ts (and the react
+  // pair) — pin the extensions so tsdown's .mjs/.d.mts defaults can't silently
+  // break the published entry paths. `check:dist` verifies post-build.
+  outExtensions: () => ({ js: ".js", dts: ".d.ts" }),
   // src/react.tsx begins with "use client" — it must survive into
   // dist/react.js so Next.js App Router consumers can import the adapter
-  // from a server component tree. Verified post-build.
+  // from a server component tree. Verified post-build by `check:dist`.
 });
