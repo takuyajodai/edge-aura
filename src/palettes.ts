@@ -12,10 +12,13 @@
  */
 
 /** A palette stop: [position 0..1, [r, g, b]]. */
-export type EdgeAuraPaletteStop = [number, number[]];
+export type EdgeAuraPaletteStop = [number, [number, number, number]];
 
 /** A full stop array (positions must start at 0 and end at 1). */
-export type PaletteStops = EdgeAuraPaletteStop[];
+export type EdgeAuraPaletteStops = EdgeAuraPaletteStop[];
+
+/** @deprecated Use {@link EdgeAuraPaletteStops}. Alias kept for 0.1.x consumers. */
+export type PaletteStops = EdgeAuraPaletteStops;
 
 export const EDGE_AURA_PALETTES = {
   /** Stock Siri-style mesh gradient — the engine's default. */
@@ -81,18 +84,7 @@ export const EDGE_AURA_PALETTES = {
     [0.80, [255, 235, 240]],  // near-white
     [1.0,  [255, 183, 197]],
   ],
-} satisfies Record<string, PaletteStops>;
+} satisfies Record<string, EdgeAuraPaletteStops>;
 
 /** Union of preset names — keep in sync automatically via keyof. */
 export type EdgeAuraPaletteName = keyof typeof EDGE_AURA_PALETTES;
-
-/**
- * The palette the EDIT MODE edge aura uses (components/editor/EditingAura.tsx).
- * The edit-entry entrance is now the engine's own "kindle" reveal of this very
- * ring, so the entrance and the steady glow draw from the SAME stops by
- * construction — there is no separate activation renderer to keep in sync.
- *
- * Default is the full "siri" rainbow spectrum (Apple-Intelligence look); swap
- * to "aurora" (cool green/ice) here for a calmer single-family glow.
- */
-export const EDIT_AURA_PALETTE: EdgeAuraPaletteName = "siri";

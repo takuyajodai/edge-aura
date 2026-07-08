@@ -12,12 +12,8 @@
         background: #fff;
         color: #1c1917;
       }
-      /* The overlay the <EdgeAura> component renders into. The component
-         ships no styles — position it yourself (this is the recommended
-         full-viewport, click-through setup). */
-      .editing-aura { position: fixed; inset: 0; pointer-events: none; z-index: 40; }
-      .aura-canvas  { position: fixed; inset: 0; width: 100%; height: 100%; pointer-events: none; }
-
+      /* No aura CSS needed: <EdgeAura> ships inline default styles
+         (full-viewport, click-through overlay) — zero-config by design. */
       main {
         min-height: 100%;
         display: flex;

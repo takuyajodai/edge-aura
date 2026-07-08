@@ -14,9 +14,10 @@ production editor where it runs daily.
 ```sh
 npm run typecheck   # tsc --noEmit — the verification gate (no test suite)
 npm run build       # tsdown → dist/ (ESM + .d.ts)
+npm run check:dist  # dist/ gate: entry paths, "use client", react-free core
 npm run demo        # Vite dev server for demo/ (resolves package names to src/)
 npm run demo:build  # verify the demo compiles
-npm publish         # prepublishOnly runs typecheck + build automatically
+npm publish         # prepublishOnly runs typecheck + build + check:dist
 ```
 
 ## Architecture rules

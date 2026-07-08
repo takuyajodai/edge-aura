@@ -88,7 +88,7 @@ function Demo() {
               setEntranceKey((k) => k + 1);
             }}
           >
-            kindle（点火をリプレイ）
+            Replay kindle entrance
           </button>
           <button onClick={() => setSavedAt(Date.now())}>saved pulse</button>
         </div>

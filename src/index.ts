@@ -17,11 +17,12 @@ export {
   type EdgeAuraMotionOptions,
   type EdgeAuraInputOptions,
   type EdgeAuraPaletteStop,
+  type EdgeAuraPaletteStops,
 } from "./engine";
 
 export {
   EDGE_AURA_PALETTES,
-  EDIT_AURA_PALETTE,
+  // PaletteStops is a @deprecated alias of EdgeAuraPaletteStops.
   type PaletteStops,
   type EdgeAuraPaletteName,
 } from "./palettes";

@@ -52,16 +52,20 @@
  * stiffness/damping pairs are internal tuning coupled to the decay rates.
  */
 
-import { EDGE_AURA_PALETTES, type EdgeAuraPaletteStop } from "./palettes";
+import {
+  EDGE_AURA_PALETTES,
+  type EdgeAuraPaletteStop,
+  type EdgeAuraPaletteStops,
+} from "./palettes";
 
 // ---------------------------------------------------------------------------
 // Options
 // ---------------------------------------------------------------------------
 
-export type { EdgeAuraPaletteStop } from "./palettes";
+export type { EdgeAuraPaletteStop, EdgeAuraPaletteStops } from "./palettes";
 
 export interface EdgeAuraGeometryOptions {
-  /** Centerline inset from the viewport edges (px). Default 5. */
+  /** Centerline inset from the viewport edges (px). Default 3. */
   inset?: number;
   /**
    * Fade the composited aura to transparent over the topmost N px (0 =
@@ -95,9 +99,11 @@ export interface EdgeAuraGeometryOptions {
    */
   band?: number;
   /**
-   * Core line thickness: σ undulates along the ring within base ± var
-   * (1px-grid aliasing shimmers below ~1.3, so keep base − var above that).
-   * Defaults 1.55 / 0.35 → σ ∈ [1.2, 1.9].
+   * Core line thickness: σ undulates along the ring within base ± var.
+   * Defaults 1.6 / 0.6 → σ ∈ [1.0, 2.2]. Brief excursions to the ~1.0 thin
+   * extreme are part of the tuned organic look; values pinned below ~1.3
+   * for long stretches (e.g. a small base with var near 0) may show
+   * 1px-grid aliasing shimmer.
    */
   coreSigmaBase?: number;
   coreSigmaVar?: number;
@@ -117,7 +123,7 @@ export interface EdgeAuraPaletteOptions {
    * Gradient stops for the ring hue cycle (positions must start at 0 and end
    * at 1).  Default: Siri-style mesh gradient stops.
    */
-  stops?: EdgeAuraPaletteStop[];
+  stops?: EdgeAuraPaletteStops;
   /**
    * Pastel shift: mix every palette entry toward white at LUT build time —
    * tames raw vividness into a clean, modern tint (0 = original colors).
@@ -128,7 +134,7 @@ export interface EdgeAuraPaletteOptions {
   coreWhiten?: number;
   /**
    * Overall ring translucency — caps the maximum alpha so the page always
-   * shows through slightly (1 = fully opaque centerline). Default 0.8.
+   * shows through slightly (1 = fully opaque centerline). Default 0.9.
    */
   ringAlpha?: number;
   /**
@@ -169,6 +175,12 @@ export interface EdgeAuraMotionOptions {
    * steady aura. Default 0.85.
    */
   kindleDurS?: number;
+  /**
+   * Soft width (px) of the kindle reveal wavefront — the envelope ramps from
+   * 0 to 1 over this arc-distance behind the front, so the ring kindles in
+   * instead of snapping on. Default 90.
+   */
+  kindleSoftPx?: number;
 }
 
 export interface EdgeAuraInputOptions {
@@ -197,6 +209,13 @@ export interface EdgeAuraOptions {
   palette?: EdgeAuraPaletteOptions;
   motion?: EdgeAuraMotionOptions;
   input?: EdgeAuraInputOptions;
+  /**
+   * Deterministic seed for the five per-instance noise phases: when set to a
+   * finite number, the phases derive from a tiny mulberry32 PRNG instead of
+   * Math.random() — for reproducible rendering in tests/QA. The phase range
+   * is identical either way. Default: unset (random phases per instance).
+   */
+  seed?: number;
 }
 
 /**
@@ -241,6 +260,7 @@ export const EDGE_AURA_DEFAULTS = {
     rotateTypingS: 3,
     rotateIdleS: 8,
     kindleDurS: 0.85,
+    kindleSoftPx: 90,
   },
   input: {
     keySigma: 90,
@@ -296,6 +316,62 @@ function lutPerceptualWeight(lut: Uint8Array): number {
     sum += 1 - lum;
   }
   return sum / LUT_SIZE;
+}
+
+/**
+ * Structural palette validation. A malformed stop array corrupts the LUT
+ * silently (NaN colors, wrapped seams), so structural garbage fails loudly
+ * at creation time — unlike numeric scalar options, which are merely clamped
+ * to safe minimums (a decorative overlay should degrade, not crash, on
+ * out-of-range numbers).
+ */
+function validatePaletteStops(stops: unknown): asserts stops is EdgeAuraPaletteStops {
+  if (!Array.isArray(stops) || stops.length < 2) {
+    throw new Error("edge-aura: palette stops must be an array of at least 2 entries");
+  }
+  let prevPos = -Infinity;
+  for (let i = 0; i < stops.length; i++) {
+    const stop: unknown = stops[i];
+    if (!Array.isArray(stop) || stop.length !== 2) {
+      throw new Error(`edge-aura: palette stop ${i} must be a [position, [r, g, b]] pair`);
+    }
+    const pos: unknown = stop[0];
+    const color: unknown = stop[1];
+    if (typeof pos !== "number" || !Number.isFinite(pos)) {
+      throw new Error(`edge-aura: palette stop ${i} position must be a finite number`);
+    }
+    if (pos < prevPos) {
+      throw new Error(`edge-aura: palette stop positions must be non-decreasing (stop ${i})`);
+    }
+    prevPos = pos;
+    if (
+      !Array.isArray(color) ||
+      color.length !== 3 ||
+      !color.every((c) => typeof c === "number" && Number.isFinite(c))
+    ) {
+      throw new Error(`edge-aura: palette stop ${i} color must be a 3-tuple of finite numbers`);
+    }
+  }
+  if ((stops[0] as [number, unknown])[0] !== 0) {
+    throw new Error("edge-aura: first palette stop position must be exactly 0");
+  }
+  if ((stops[stops.length - 1] as [number, unknown])[0] !== 1) {
+    throw new Error("edge-aura: last palette stop position must be exactly 1");
+  }
+}
+
+/**
+ * Tiny deterministic PRNG (mulberry32) backing the `seed` option — 32-bit
+ * state, zero dependencies, more than enough quality for five noise phases.
+ */
+function mulberry32(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), a | 1);
+    t = (t + Math.imul(t ^ (t >>> 7), t | 61)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
 }
 
 const HALF_PI = Math.PI / 2;
@@ -401,13 +477,19 @@ export interface AuraEngine {
   /** Inject tap energy and optionally update the hotspot target. */
   tap(point: { x: number; y: number } | null): void;
   /**
-   * Inject keystroke energy as an independent bottom-edge bump fixed at the
-   * key's x position (it rises and decays in place — it never travels).
-   * Only x (viewport fraction, mapped to a bottom-edge column) is used;
-   * y is accepted because hosts typically pass full caret coordinates.
+   * Inject keystroke energy as an independent bottom-edge bump. `x` is a
+   * 0..1 fraction mapped across the bottom edge (via keyXMin/keyXSpan); the
+   * bump is fixed at that position — it rises and decays in place, never
+   * traveling.
    */
-  key(x: number, y: number): void;
-  /** Inject save-pulse energy (+savedPulseEnergy). */
+  key(x: number): void;
+  /**
+   * Inject a gentle ambient energy pulse (e.g. "a save just succeeded"),
+   * capped at energyCap. Defaults to `input.savedPulseEnergy` when no
+   * amount is given.
+   */
+  pulse(energy?: number): void;
+  /** @deprecated Use {@link AuraEngine.pulse}. Alias kept for 0.1.x hosts. */
   savedPulse(): void;
   /**
    * Begin the entrance "kindle": the steady ring is revealed by a wavefront
@@ -415,7 +497,7 @@ export interface AuraEngine {
    * into the exact steady state with zero residual energy. Purely a reveal
    * envelope — injects NO energy. While kindling, per-position alpha is scaled
    * by the wavefront envelope; once complete, every frame is byte-identical to
-   * the steady aura. Call once on edit entry.
+   * the steady aura. Call once when the effect is activated.
    */
   kindle(x: number, y: number): void;
   /** Switch rotation speed between typing (fast) and idle (slow). */
@@ -446,13 +528,29 @@ export function createAuraEngine(
   const mot = { ...EDGE_AURA_DEFAULTS.motion,   ...options?.motion };
   const inp = { ...EDGE_AURA_DEFAULTS.input,    ...options?.input };
 
+  // Structurally invalid palettes fail loudly; numeric scalars below are
+  // instead CLAMPED to safe minimums — this is a decorative library, so
+  // garbage numbers degrade gracefully rather than crash the host.
+  validatePaletteStops(pal.stops);
+
+  // Non-finite scalars (NaN/Infinity) would slip through a bare Math.max
+  // (Math.max(min, NaN) === NaN) and either crash buffer allocation or
+  // silently poison the energy math forever — fall back to the default
+  // instead, consistent with the graceful-degradation contract above.
+  const clampOpt = (v: number, min: number, fallback: number): number =>
+    Number.isFinite(v) ? Math.max(min, v) : fallback;
+
+  const DEF_GEO = EDGE_AURA_DEFAULTS.geometry;
+  const DEF_MOT = EDGE_AURA_DEFAULTS.motion;
+  const DEF_INP = EDGE_AURA_DEFAULTS.input;
+
   // Geometry: centerline rounded rect inset INSET px from the viewport edges
   // with corner radius CR.  RIM = INSET + CR is the distance from a screen
   // edge to a corner-arc center (and the strip/corner tiling offset).
-  const INSET = geo.inset;
-  const CR = geo.cornerRadius;
+  const INSET = clampOpt(geo.inset, 0, DEF_GEO.inset);
+  const CR = clampOpt(geo.cornerRadius, 0, DEF_GEO.cornerRadius);
   const RIM = INSET + CR;
-  const BAND = geo.band;
+  const BAND = clampOpt(geo.band, 8, DEF_GEO.band);
   const TOP_FADE = geo.topEdgeFade ?? 0;
   const TOP_CORNER_FADE = geo.topCornerFade ?? 0;
   // Corner buffer size: exactly the RIM×RIM quadrant nearest the screen
@@ -467,26 +565,27 @@ export function createAuraEngine(
   const CORE_SIGMA_VAR  = geo.coreSigmaVar;
   const INNER_SOFT_BASE = geo.innerSoftBase;
   const INNER_SOFT_VAR  = geo.innerSoftVar;
-  const INNER_SIGMA_MAX = geo.innerSigmaMax;
+  const INNER_SIGMA_MAX = clampOpt(geo.innerSigmaMax, 1, DEF_GEO.innerSigmaMax);
 
-  const KEY_SIGMA = inp.keySigma;
-  const TAP_SIGMA = inp.tapSigma;
+  const KEY_SIGMA = clampOpt(inp.keySigma, 1, DEF_INP.keySigma);
+  const TAP_SIGMA = clampOpt(inp.tapSigma, 1, DEF_INP.tapSigma);
   const TAP_ENERGY         = inp.tapEnergy;
   const KEY_ENERGY         = inp.keyEnergy;
   const SAVED_PULSE_ENERGY = inp.savedPulseEnergy;
   const KEY_X_MIN  = inp.keyXMin;
   const KEY_X_SPAN = inp.keyXSpan;
 
-  const ENERGY_CAP = mot.energyCap;
-  const DECAY      = mot.decay;
-  const KEY_DECAY  = mot.keyDecay;
-  const ROTATE_TYPING_S = mot.rotateTypingS;
-  const ROTATE_IDLE_S   = mot.rotateIdleS;
-  const KINDLE_DUR      = mot.kindleDurS;
-  // Soft width (px) of the reveal wavefront — the envelope ramps from 0 to 1
-  // over this arc-distance behind the front, so the ring kindles in instead of
-  // snapping on.
-  const KINDLE_SOFT = 90;
+  // energyCap must stay strictly positive (it caps every energy injection).
+  const ENERGY_CAP = clampOpt(mot.energyCap, 1e-3, DEF_MOT.energyCap);
+  // Decay rates have no minimum, but a NaN here would make every energy
+  // store NaN forever (NaN never decays) — finite-guard to the defaults.
+  const DECAY      = Number.isFinite(mot.decay) ? mot.decay : DEF_MOT.decay;
+  const KEY_DECAY  = Number.isFinite(mot.keyDecay) ? mot.keyDecay : DEF_MOT.keyDecay;
+  const ROTATE_TYPING_S = clampOpt(mot.rotateTypingS, 0.05, DEF_MOT.rotateTypingS);
+  const ROTATE_IDLE_S   = clampOpt(mot.rotateIdleS, 0.05, DEF_MOT.rotateIdleS);
+  const KINDLE_DUR      = clampOpt(mot.kindleDurS, 0.05, DEF_MOT.kindleDurS);
+  // Divisor in the kindle envelope — clamp like the other pixel-scale sigmas.
+  const KINDLE_SOFT     = clampOpt(mot.kindleSoftPx, 1, DEF_MOT.kindleSoftPx);
 
   const CORE_WHITEN = pal.coreWhiten;
 
@@ -515,7 +614,13 @@ export function createAuraEngine(
   const PALETTE_LUT = lut;
 
   // -- Stable per-instance random phases (one per noise stream in neonAt) --
-  const phase = Array.from({ length: 5 }, () => Math.random() * 80);
+  // A finite `seed` swaps Math.random for a deterministic PRNG so tests/QA
+  // can reproduce exact pixels; the phase range (x * 80) is identical.
+  const rand =
+    typeof options?.seed === "number" && Number.isFinite(options.seed)
+      ? mulberry32(options.seed)
+      : Math.random;
+  const phase = Array.from({ length: 5 }, () => rand() * 80);
 
   // Full resolution: the scanline renderer is cheap enough to skip a
   // quarter-res downsample, and full-res strips avoid interpolation seams.
@@ -554,6 +659,13 @@ export function createAuraEngine(
     return { img: cx.createImageData(w, h), cv, cx };
   };
 
+  // Cached fade gradients (destination-out erasers for the chrome-sampler
+  // guards below) — rebuilt in allocBuffers, which runs on every size change,
+  // so drawFrame never constructs CanvasGradient objects per frame.
+  let topFadeGradient: CanvasGradient | null = null;
+  let topCornerFadeL: CanvasGradient | null = null;
+  let topCornerFadeR: CanvasGradient | null = null;
+
   const allocBuffers = () => {
     const W = canvas.width, H = canvas.height;
     stripTop    = mkBuf(W - 2 * RIM, BAND);
@@ -564,6 +676,32 @@ export function createAuraEngine(
     cornerTR = mkBuf(CQ, CQ);
     cornerBR = mkBuf(CQ, CQ);
     cornerBL = mkBuf(CQ, CQ);
+
+    // (Re)build the fade gradients for this canvas size: the linear top fade
+    // is size-independent (cheap to rebuild anyway); the corner radials
+    // anchor at x = 0 and x = W.  Both ramp: fully erased for the inner 40%,
+    // untouched beyond the fade distance.
+    topFadeGradient = null;
+    if (TOP_FADE > 0) {
+      const g = ctx.createLinearGradient(0, 0, 0, TOP_FADE);
+      g.addColorStop(0, "rgba(0,0,0,1)");
+      g.addColorStop(0.4, "rgba(0,0,0,1)");
+      g.addColorStop(1, "rgba(0,0,0,0)");
+      topFadeGradient = g;
+    }
+    topCornerFadeL = null;
+    topCornerFadeR = null;
+    if (TOP_CORNER_FADE > 0) {
+      const mkRadial = (cornerX: number) => {
+        const g = ctx.createRadialGradient(cornerX, 0, 0, cornerX, 0, TOP_CORNER_FADE);
+        g.addColorStop(0, "rgba(0,0,0,1)");
+        g.addColorStop(0.4, "rgba(0,0,0,1)");
+        g.addColorStop(1, "rgba(0,0,0,0)");
+        return g;
+      };
+      topCornerFadeL = mkRadial(0);
+      topCornerFadeR = mkRadial(W);
+    }
   };
 
   {
@@ -595,7 +733,8 @@ export function createAuraEngine(
   const sBurst = mkSpring(46, 10);
   const sHot   = mkSpring(34, 8);
 
-  // 2-D glide spring for tap-hotspot (caret edge projection).
+  // 2-D glide spring for the tap hotspot (the tap point projected to its
+  // nearest edge).
   const pos: Spring2D = { x: window.innerWidth / 2, y: window.innerHeight, vx: 0, vy: 0, k: 16,  c: 7.5 };
 
   let tapPoint: { x: number; y: number } | null = null;
@@ -839,18 +978,26 @@ export function createAuraEngine(
     W: number, H: number,
     sRight0: number, sBottom0: number, sLeft0: number,
   ) => {
-    const topW = stripTop ? stripTop.cv.width : 0;
+    // Byte layout derives from each strip's OWN buffer dimensions — never a
+    // sibling's — so a change to one allocation can never silently corrupt
+    // another strip's indexing. (Top/bottom widths are equal today, as are
+    // left/right; that is an allocation detail, not a layout contract.)
+    const topW   = stripTop    ? stripTop.cv.width     : 0;
+    const botW   = stripBottom ? stripBottom.cv.width  : 0;
+    const botH   = stripBottom ? stripBottom.cv.height : 0;
+    const leftW  = stripLeft   ? stripLeft.cv.width    : 0;
+    const rightW = stripRight  ? stripRight.cv.width   : 0;
     // Clockwise s direction: top and right run with increasing coordinate,
     // bottom and left run against it.
     const strips: StripCfg[] = [
       { buf: stripTop,    edgeId: TOP,    sBase: -RIM,               sDir:  1, limit: W, ownBias: 1,
-        base0: 0,                     basePerI: 4,        strideBytes:  topW * 4 },
+        base0: 0,                    basePerI: 4,          strideBytes:  topW * 4 },
       { buf: stripBottom, edgeId: BOTTOM, sBase: sBottom0 + W - RIM, sDir: -1, limit: W, ownBias: 1,
-        base0: (BAND - 1) * topW * 4, basePerI: 4,        strideBytes: -topW * 4 },
+        base0: (botH - 1) * botW * 4, basePerI: 4,         strideBytes: -botW * 4 },
       { buf: stripLeft,   edgeId: LEFT,   sBase: sLeft0 + H - RIM,   sDir: -1, limit: H, ownBias: 0,
-        base0: 0,                     basePerI: BAND * 4, strideBytes:  4 },
+        base0: 0,                    basePerI: leftW * 4,  strideBytes:  4 },
       { buf: stripRight,  edgeId: RIGHT,  sBase: sRight0 - RIM,      sDir:  1, limit: H, ownBias: 0,
-        base0: (BAND - 1) * 4,        basePerI: BAND * 4, strideBytes: -4 },
+        base0: (rightW - 1) * 4,     basePerI: rightW * 4, strideBytes: -4 },
     ];
     for (const cfg of strips) drawStrip(cfg);
   };
@@ -954,14 +1101,11 @@ export function createAuraEngine(
     // their window chrome from the page's top pixels (Arc, Safari-style)
     // see neutral canvas instead of the animated glow. Fully erased for the
     // first 40% of the strip, ramping to untouched at TOP_FADE px.
-    if (TOP_FADE > 0) {
-      const g = ctx.createLinearGradient(0, 0, 0, TOP_FADE);
-      g.addColorStop(0, "rgba(0,0,0,1)");
-      g.addColorStop(0.4, "rgba(0,0,0,1)");
-      g.addColorStop(1, "rgba(0,0,0,0)");
+    // (Gradients are cached — built in allocBuffers on every size change.)
+    if (topFadeGradient) {
       ctx.save();
       ctx.globalCompositeOperation = "destination-out";
-      ctx.fillStyle = g;
+      ctx.fillStyle = topFadeGradient;
       ctx.fillRect(0, 0, W, TOP_FADE);
       ctx.restore();
     }
@@ -971,23 +1115,13 @@ export function createAuraEngine(
     // at its right end, and the side glows below TOP_FADE would otherwise
     // still feed them. Radial: fully erased for the inner 40%, untouched
     // beyond TOP_CORNER_FADE px from the corner point.
-    if (TOP_CORNER_FADE > 0) {
+    if (topCornerFadeL && topCornerFadeR) {
       ctx.save();
       ctx.globalCompositeOperation = "destination-out";
-      for (const cornerX of [0, W]) {
-        const g = ctx.createRadialGradient(
-          cornerX, 0, 0,
-          cornerX, 0, TOP_CORNER_FADE
-        );
-        g.addColorStop(0, "rgba(0,0,0,1)");
-        g.addColorStop(0.4, "rgba(0,0,0,1)");
-        g.addColorStop(1, "rgba(0,0,0,0)");
-        ctx.fillStyle = g;
-        ctx.fillRect(
-          cornerX === 0 ? 0 : W - TOP_CORNER_FADE, 0,
-          TOP_CORNER_FADE, TOP_CORNER_FADE
-        );
-      }
+      ctx.fillStyle = topCornerFadeL;
+      ctx.fillRect(0, 0, TOP_CORNER_FADE, TOP_CORNER_FADE);
+      ctx.fillStyle = topCornerFadeR;
+      ctx.fillRect(W - TOP_CORNER_FADE, 0, TOP_CORNER_FADE, TOP_CORNER_FADE);
       ctx.restore();
     }
   };
@@ -1024,7 +1158,9 @@ export function createAuraEngine(
   const engine: AuraEngine = {
     step(dtMs: number) {
       if (destroyed) return;
-      const dt = Math.min(0.05, dtMs / 1000);
+      // Clamp dt to [0, 50ms]: negative and NaN dtMs (host clock glitches,
+      // first-frame deltas) become 0 instead of corrupting the springs.
+      const dt = Math.min(0.05, Math.max(0, dtMs / 1000) || 0);
       elapsed += dt;
 
       // Advance the kindle reveal. progress eases to 1; the wavefront travels
@@ -1087,9 +1223,7 @@ export function createAuraEngine(
       energy = Math.min(energy + TAP_ENERGY, ENERGY_CAP);
     },
 
-    key(x, _y) {
-      // Only x drives the bottom-edge bump; y is accepted but unread (the
-      // host passes full caret coordinates — see the interface doc).
+    key(x) {
       // The pixel position is fixed at press time: bumps never travel.
       const tanX = (KEY_X_MIN + KEY_X_SPAN * x) * window.innerWidth;
 
@@ -1117,8 +1251,16 @@ export function createAuraEngine(
       slot.energy = Math.min(KEY_ENERGY, ENERGY_CAP);
     },
 
+    pulse(amount?: number) {
+      // Non-finite input would poison the shared energy store (NaN never
+      // decays) — degrade to the default pulse energy instead.
+      const e = Number.isFinite(amount) ? Math.max(0, amount!) : SAVED_PULSE_ENERGY;
+      energy = Math.min(energy + e, ENERGY_CAP);
+    },
+
     savedPulse() {
-      energy = Math.min(energy + SAVED_PULSE_ENERGY, ENERGY_CAP);
+      // Deprecated alias — see the interface doc.
+      engine.pulse();
     },
 
     kindle(x, y) {

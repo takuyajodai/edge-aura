@@ -2,7 +2,9 @@
  * Maps a physical KeyboardEvent.code to a normalised (x, y) position on a
  * virtual keyboard grid — x: 0 (left) → 1 (right), y: 0 (top) → 1 (bottom).
  *
- * Row y values follow standard keyboard layout conventions:
+ * The grid is a physical-layout APPROXIMATION covering the printable keys of
+ * the ANSI layout; unknown and modifier-only codes return null. Row y values
+ * follow standard layout conventions:
  *   Digit row  → y = 0
  *   QWERTY row → y = 0.25
  *   ASDF row   → y = 0.5
@@ -10,7 +12,8 @@
  *   Space row  → y = 1
  *
  * x = (index + 0.5) / rowLength, keeping every key centred in its cell.
- * Modifier / navigation keys with no clear lateral position return null.
+ * Note: the engine currently consumes only x (the bottom-edge bump position);
+ * y is provided for forward compatibility and custom hosts.
  */
 
 const ROWS: [string[], number][] = [
