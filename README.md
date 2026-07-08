@@ -3,7 +3,7 @@
 [![npm version](https://img.shields.io/npm/v/edge-aura.svg)](https://www.npmjs.com/package/edge-aura)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 
-<!-- hero image: docs/hero.png (added post-merge) -->
+<img src="https://raw.githubusercontent.com/takuyajodai/edge-aura/main/docs/hero.png" alt="edge-aura — an organic glow ring hugging the viewport edges, with a tap bloom on the bottom edge" width="100%">
 
 An organic, Siri-style screen-edge glow: a rounded-rectangle "neon tube"
 hugging the viewport edges — a bright undulating core line plus a soft
