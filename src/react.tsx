@@ -74,7 +74,16 @@ export function EdgeAura({
     engineRef.current = engine;
 
     // Expose engine for pixel-level QA in dev without running the full app.
-    if (process.env.NODE_ENV !== "production") {
+    // The env check is inlined at the use site (never hoisted into a module
+    // const): with the condition ending in the textual `process.env.NODE_ENV`
+    // comparison, a bundler `define` of NODE_ENV="production" makes the whole
+    // condition statically falsy, so minifiers drop this block from production
+    // bundles. The `typeof` guard keeps it crash-safe in unbundled browsers.
+    if (
+      typeof process !== "undefined" &&
+      !!process.env &&
+      process.env.NODE_ENV !== "production"
+    ) {
       (window as unknown as Record<string, unknown>).__auraEngine = engine;
     }
 
@@ -92,12 +101,17 @@ export function EdgeAura({
       engine.kindle(kindleOriginRef.current.x, kindleOriginRef.current.y);
     }
 
+    // rAF loop lifecycle: `running` gates tick's self-rescheduling so the loop
+    // can be stopped without racing a pending callback, start() is idempotent
+    // (never two concurrent loops), and stop() both cancels the pending frame
+    // and flips the flag — nothing fires after stop() in any state.
     let raf = 0;
-    let last = performance.now();
+    let running = false;
+    let last = 0;
 
     const tick = (now: number) => {
+      if (!running) return;
       raf = requestAnimationFrame(tick);
-      if (reducedMotion) return;
 
       const dtMs = now - last;
       last = now;
@@ -116,7 +130,20 @@ export function EdgeAura({
       engine.render();
     };
 
-    raf = requestAnimationFrame(tick);
+    const start = () => {
+      if (running) return;
+      running = true;
+      last = performance.now();
+      raf = requestAnimationFrame(tick);
+    };
+
+    const stop = () => {
+      running = false;
+      cancelAnimationFrame(raf);
+    };
+
+    // Under reduced motion the static frame above is all we show — no loop.
+    if (!reducedMotion) start();
 
     // -- Window event wiring --
     const onTap = (e: Event) => {
@@ -140,11 +167,10 @@ export function EdgeAura({
     const onMotionChange = (ev: MediaQueryListEvent) => {
       reducedMotion = ev.matches;
       if (reducedMotion) {
-        cancelAnimationFrame(raf);
+        stop();
         engine.renderStatic();
       } else {
-        last = performance.now();
-        raf = requestAnimationFrame(tick);
+        start();
       }
     };
 
@@ -159,7 +185,7 @@ export function EdgeAura({
     mq.addEventListener("change", onMotionChange);
 
     return () => {
-      cancelAnimationFrame(raf);
+      stop();
       window.removeEventListener(tapEvent, onTap);
       window.removeEventListener(keyEvent, onKey);
       window.removeEventListener(savedEvent, onSavedPulse);
@@ -167,7 +193,12 @@ export function EdgeAura({
       mq.removeEventListener("change", onMotionChange);
       engine.destroy();
       engineRef.current = null;
-      if (process.env.NODE_ENV !== "production") {
+      // Same inlined dev check as above — see the comment there.
+      if (
+        typeof process !== "undefined" &&
+        !!process.env &&
+        process.env.NODE_ENV !== "production"
+      ) {
         delete (window as unknown as Record<string, unknown>).__auraEngine;
       }
     };
