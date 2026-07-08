@@ -1,7 +1,13 @@
 "use client";
 
 import { useEffect, useRef, type CSSProperties } from "react";
-import { createAuraEngine, type AuraEngine, type EdgeAuraOptions } from "./engine";
+import {
+  createAuraEngine,
+  type AuraEngine,
+  type EdgeAuraOptions,
+  type EdgeAuraPaletteStops,
+} from "./engine";
+import { EDGE_AURA_PALETTES, type EdgeAuraPaletteName } from "./palettes";
 
 export type AuraState = "idle" | "typing";
 
@@ -17,6 +23,21 @@ export interface EdgeAuraProps {
   savedAt?: number;
   /** Engine tuning overrides (defaults reproduce the stock appearance). */
   options?: EdgeAuraOptions;
+  /**
+   * Ring palette — a preset name (e.g. "ocean") or a raw stop array. REACTIVE:
+   * at mount it overrides `options.palette.stops` for engine creation; on any
+   * later change the engine crossfades to the new palette (350 ms). Takes
+   * precedence over `options.palette.stops` while set; changing it back to
+   * undefined does NOT revert the ring (set an explicit palette instead).
+   */
+  palette?: EdgeAuraPaletteName | EdgeAuraPaletteStops;
+  /**
+   * Whether the animation loop runs. Default true. REACTIVE: false stops the
+   * rAF loop and freezes the last rendered frame (the canvas is NOT cleared);
+   * true (re)starts it. Under prefers-reduced-motion the loop never runs
+   * regardless of this prop (the static frame wins).
+   */
+  active?: boolean;
   /**
    * Prefix for the window CustomEvent channel: the component listens to
    * `${prefix}:tap`, `${prefix}:key`, `${prefix}:saved-pulse`.
@@ -51,6 +72,14 @@ const WRAPPER_STYLE: CSSProperties = {
   pointerEvents: "none",
 };
 
+// Resolve a preset name to its stop array; raw stop arrays pass through.
+// (The engine validates the stops structurally at creation/setPalette time.)
+function resolvePaletteStops(
+  palette: EdgeAuraPaletteName | EdgeAuraPaletteStops,
+): EdgeAuraPaletteStops {
+  return typeof palette === "string" ? EDGE_AURA_PALETTES[palette] : palette;
+}
+
 const CANVAS_STYLE: CSSProperties = {
   position: "absolute",
   inset: 0,
@@ -73,6 +102,8 @@ export function EdgeAura({
   state = "idle",
   savedAt = 0,
   options,
+  palette,
+  active = true,
   eventPrefix = "aura",
   kindleOrigin = null,
   className,
@@ -86,6 +117,19 @@ export function EdgeAura({
   const optionsRef  = useRef(options);
   // Mount-time value only — read once when the engine is created.
   const kindleOriginRef = useRef(kindleOrigin);
+  // Last applied palette prop: used at engine creation (so a re-created
+  // engine keeps the current palette) and to skip the setPalette call on the
+  // initial render — only CHANGES crossfade.
+  const paletteRef = useRef(palette);
+  // Current `active` prop for the main effect's closure, plus a handle to its
+  // loop-sync function so the small [active] effect can start/stop the loop
+  // without widening the main effect's dependency array.
+  const activeRef   = useRef(active);
+  const syncLoopRef = useRef<(() => void) | null>(null);
+  // Whether prefers-reduced-motion is currently in effect — written by the
+  // main effect (at mount and on media change) so the palette effect can pick
+  // the right swap strategy without owning its own media query.
+  const reducedMotionRef = useRef(false);
 
   // Sync props into refs so the rAF closure always sees current values.
   useEffect(() => {
@@ -103,9 +147,24 @@ export function EdgeAura({
     const canvas = canvasRef.current;
     if (!canvas) return;
 
+    // The palette prop overrides options.palette.stops for creation, so the
+    // engine starts on the declared palette with no visible swap after mount.
+    const baseOptions = optionsRef.current;
+    const paletteOverride = paletteRef.current;
+    const creationOptions: EdgeAuraOptions | undefined =
+      paletteOverride != null
+        ? {
+            ...baseOptions,
+            palette: {
+              ...baseOptions?.palette,
+              stops: resolvePaletteStops(paletteOverride),
+            },
+          }
+        : baseOptions;
+
     let engine: AuraEngine;
     try {
-      engine = createAuraEngine(canvas, optionsRef.current);
+      engine = createAuraEngine(canvas, creationOptions);
     } catch (err) {
       // Decorative overlay: never take the app down, but tell developers.
       // Same inlined dev check as the __auraEngine block below.
@@ -136,6 +195,7 @@ export function EdgeAura({
 
     const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
     let reducedMotion = mq.matches;
+    reducedMotionRef.current = reducedMotion;
 
     if (reducedMotion) engine.renderStatic();
 
@@ -190,8 +250,22 @@ export function EdgeAura({
       cancelAnimationFrame(raf);
     };
 
+    // Single decision point for whether the loop should run: reduced motion
+    // always wins (static frame only), then the `active` prop gates the loop.
+    // start()/stop() are idempotent, so calling this redundantly (StrictMode
+    // double-effects, prop toggles to the same value) is safe. Stopping
+    // freezes the last frame — the canvas is intentionally NOT cleared.
+    const syncLoop = () => {
+      if (activeRef.current && !reducedMotion) {
+        start();
+      } else {
+        stop();
+      }
+    };
+    syncLoopRef.current = syncLoop;
+
     // Under reduced motion the static frame above is all we show — no loop.
-    if (!reducedMotion) start();
+    syncLoop();
 
     // -- Window event wiring --
     const onTap = (e: Event) => {
@@ -218,11 +292,13 @@ export function EdgeAura({
 
     const onMotionChange = (ev: MediaQueryListEvent) => {
       reducedMotion = ev.matches;
+      reducedMotionRef.current = reducedMotion;
       if (reducedMotion) {
         stop();
         engine.renderStatic();
       } else {
-        start();
+        // Motion allowed again — resume only if `active` also permits it.
+        syncLoop();
       }
     };
 
@@ -238,6 +314,9 @@ export function EdgeAura({
 
     return () => {
       stop();
+      // Only clear the handle if it still points at THIS effect's closure
+      // (mirrors the __auraEngine guard below).
+      if (syncLoopRef.current === syncLoop) syncLoopRef.current = null;
       window.removeEventListener(tapEvent, onTap);
       window.removeEventListener(keyEvent, onKey);
       window.removeEventListener(savedEvent, onSavedPulse);
@@ -267,6 +346,50 @@ export function EdgeAura({
   useEffect(() => {
     engineRef.current?.setTyping(state === "typing");
   }, [state]);
+
+  // Reactive palette: crossfade the live engine to the new palette on prop
+  // CHANGE only. The equality guard skips the initial render (the engine was
+  // already created with this palette) and StrictMode's double effect run.
+  useEffect(() => {
+    if (paletteRef.current === palette) return;
+    paletteRef.current = palette;
+    // A change back to undefined has no target palette — the engine keeps
+    // its current one (documented on the prop).
+    if (palette == null) return;
+    const engine = engineRef.current;
+    if (!engine) return;
+    try {
+      if (reducedMotionRef.current) {
+        // No rAF loop runs under reduced motion, so a crossfade would stay
+        // frozen at its first frame (the OLD palette) indefinitely — swap
+        // instantly and repaint the static frame instead.
+        engine.setPalette(palette);
+        engine.renderStatic();
+      } else {
+        engine.setPalette(palette, { crossfadeMs: 350 });
+      }
+    } catch (err) {
+      // Decorative overlay: a runtime-invalid palette keeps the current one
+      // instead of unmounting the host tree (an error thrown during a commit
+      // effect is uncaught by default). Mirrors the mount-time catch around
+      // createAuraEngine — same inlined dev check.
+      if (
+        typeof process !== "undefined" &&
+        !!process.env &&
+        process.env.NODE_ENV !== "production"
+      ) {
+        console.warn("edge-aura: setPalette failed", err);
+      }
+    }
+  }, [palette]);
+
+  // Reactive active: start/stop the main effect's loop via its sync handle.
+  // syncLoop reads activeRef, so update the ref first. At mount this runs
+  // after the main effect (declaration order) and is a no-op re-sync.
+  useEffect(() => {
+    activeRef.current = active;
+    syncLoopRef.current?.();
+  }, [active]);
 
   return (
     <div

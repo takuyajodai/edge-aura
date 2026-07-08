@@ -12,7 +12,8 @@ production editor where it runs daily.
 ## Commands
 
 ```sh
-npm run typecheck   # tsc --noEmit — the verification gate (no test suite)
+npm run typecheck   # tsc --noEmit (covers src/, demo/, test/)
+npm test            # vitest run — test/: engine suite (node + stub-canvas harness) and React adapter suite (jsdom, mocked engine)
 npm run build       # tsdown → dist/ (ESM + .d.ts)
 npm run check:dist  # dist/ gate: entry paths, "use client", react-free core
 npm run demo        # Vite dev server for demo/ (resolves package names to src/)
@@ -37,7 +38,21 @@ npm publish         # prepublishOnly runs typecheck + build + check:dist
   `edge-aura/react`) via Vite aliases to `src/` — new public API must work
   through those entry points, not deep imports.
 
+## Tests & CI
+
+- Tests live in `test/` (vitest): `engine.test.ts` runs in node against the
+  stub-canvas harness in `test/harness.ts` (recording 2d context — real
+  `Uint8ClampedArray` buffers, includes a golden pixel-snapshot hash);
+  `react.test.tsx` runs under jsdom with `./engine` mocked via `vi.mock`.
+  `test/` is not shipped (the package.json `files` whitelist covers this).
+- CI is `.github/workflows/ci.yml`: on every push and pull request it runs
+  `npm ci`, typecheck, build, `check:dist`, `npm test`, and `demo:build`.
+
 ## Releasing
 
-Bump `version` in package.json (semver), update README if the API changed,
-`npm publish`, then tag: `git tag v<version> && git push --tags`.
+1. Bump `version` in package.json (semver).
+2. Add a CHANGELOG.md entry (Keep a Changelog format — Added / Changed /
+   Fixed / Removed; flag breaking changes) and update README if the API
+   changed.
+3. `npm publish` — prepublishOnly runs typecheck + build + check:dist.
+4. Tag: `git tag v<version> && git push --tags`.

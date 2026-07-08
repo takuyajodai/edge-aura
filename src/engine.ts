@@ -54,6 +54,7 @@
 
 import {
   EDGE_AURA_PALETTES,
+  type EdgeAuraPaletteName,
   type EdgeAuraPaletteStop,
   type EdgeAuraPaletteStops,
 } from "./palettes";
@@ -146,10 +147,23 @@ export interface EdgeAuraPaletteOptions {
   normalize?: boolean;
   /**
    * Target perceptual weight for normalization. Default NORMALIZE_REF
-   * (the weight of the stock siri palette at pastel 0.35), so the default
-   * palette renders identically with normalization on or off.
+   * (the weight of the stock siri palette at pastel 0.35) on a "light"
+   * background, NORMALIZE_REF_DARK on a "dark" one, so the default palette
+   * renders identically with normalization on or off. An explicit value
+   * always wins over the background-derived default.
    */
   normalizeTarget?: number;
+  /**
+   * Page background the perceptual normalization equalizes against.
+   * "light" (the default) measures palette weight as distance from white
+   * (mean of 1 − relativeLuminance); "dark" flips the metric to distance
+   * from black (mean relativeLuminance) so palettes read with equal weight
+   * on dark pages. Note that `pastel` always mixes stops toward WHITE,
+   * which inherently reads stronger on dark backgrounds — that is a
+   * stylistic choice left to the user (lower `pastel` for dark pages if
+   * you want less of a whitened tint).
+   */
+  background?: "light" | "dark";
 }
 
 export interface EdgeAuraMotionOptions {
@@ -228,6 +242,17 @@ export interface EdgeAuraOptions {
  */
 export const NORMALIZE_REF = 0.25669334865196075;
 
+/**
+ * Dark-background counterpart of NORMALIZE_REF: the DARK perceptual weight
+ * (mean relativeLuminance over the 256 entries — distance from black) of the
+ * stock `siri` palette at the default pastel 0.35, computed offline the same
+ * way NORMALIZE_REF was (node script replicating buildPaletteLut +
+ * lutPerceptualWeight, full double precision).  Used as the default
+ * normalizeTarget when `palette.background` is "dark", so the default
+ * palette's normalization scale is exactly 1.0 there too.
+ */
+export const NORMALIZE_REF_DARK = 0.7433066513480395;
+
 // ---------------------------------------------------------------------------
 // Defaults — the exact original, pixel-QA'd values.
 // ---------------------------------------------------------------------------
@@ -252,6 +277,7 @@ export const EDGE_AURA_DEFAULTS = {
     ringAlpha: 0.90,
     normalize: true,
     normalizeTarget: NORMALIZE_REF,
+    background: "light",
   },
   motion: {
     decay: 1.1,
@@ -304,16 +330,18 @@ function buildPaletteLut(stops: EdgeAuraPaletteStop[], pastel: number): Uint8Arr
 }
 
 /**
- * Perceptual weight of a built LUT: mean over the 256 entries of
- * (1 − relativeLuminance), with relativeLuminance = (0.2126·r + 0.7152·g +
- * 0.0722·b)/255.  Deliberately NOT gamma-decoded — sRGB-space luma is cheap
- * and monotonic in distance-from-white, which is all normalization needs.
+ * Perceptual weight of a built LUT, with relativeLuminance = (0.2126·r +
+ * 0.7152·g + 0.0722·b)/255.  On a "light" background the weight is the mean
+ * of (1 − relativeLuminance) — distance from white; on a "dark" one the
+ * metric flips to mean relativeLuminance — distance from black.
+ * Deliberately NOT gamma-decoded — sRGB-space luma is cheap and monotonic
+ * in distance-from-the-background, which is all normalization needs.
  */
-function lutPerceptualWeight(lut: Uint8Array): number {
+function lutPerceptualWeight(lut: Uint8Array, dark: boolean): number {
   let sum = 0;
   for (let i = 0; i < LUT_SIZE; i++) {
     const lum = (0.2126 * lut[i * 3] + 0.7152 * lut[i * 3 + 1] + 0.0722 * lut[i * 3 + 2]) / 255;
-    sum += 1 - lum;
+    sum += dark ? lum : 1 - lum;
   }
   return sum / LUT_SIZE;
 }
@@ -503,6 +531,23 @@ export interface AuraEngine {
   /** Switch rotation speed between typing (fast) and idle (slow). */
   setTyping(on: boolean): void;
   /**
+   * Swap the ring's palette at runtime. Accepts a preset name (resolved via
+   * EDGE_AURA_PALETTES) or a raw stop array (validated like the creation-time
+   * option — structural garbage throws). The LUT is rebuilt through the SAME
+   * perceptual-normalization pipeline as creation, honoring this instance's
+   * normalize / normalizeTarget / pastel / ringAlpha / background settings.
+   * With `crossfadeMs` unset or 0 the swap is instant; with a positive value
+   * the rendered LUT (and effective ring alpha) blends linearly from the old
+   * palette to the new one over that duration, advanced by step() — after the
+   * fade every frame is exactly the new palette's steady output.
+   * getNormalization() reflects the new (target) palette as soon as the fade
+   * starts.
+   */
+  setPalette(
+    palette: EdgeAuraPaletteName | EdgeAuraPaletteStops,
+    opts?: { crossfadeMs?: number },
+  ): void;
+  /**
    * Diagnostic: resolved perceptual-normalization values — the final LUT
    * weight, effective ring alpha, and effective pastel actually used for
    * rendering (equal to the configured ringAlpha/pastel when `normalize`
@@ -589,29 +634,78 @@ export function createAuraEngine(
 
   const CORE_WHITEN = pal.coreWhiten;
 
-  // -- Perceptual weight normalization (one-time, at creation) --
-  // Heavy (dark/saturated) palettes get their alpha scaled DOWN toward the
-  // target weight; light (near-white) palettes get alpha scaled UP, and if
-  // the 1.0 alpha cap still isn't enough, pastel is reduced stepwise (LUT
-  // rebuilt — 256 entries, negligible) to darken the colors themselves.
-  // Palettes whose raw stops are already near white may not reach the
-  // target even at pastel 0 / alpha 1 — best effort is accepted.
-  let effPastel = pal.pastel;
-  let lut = buildPaletteLut(pal.stops, effPastel);
-  let weight = lutPerceptualWeight(lut);
-  let effRingAlpha = pal.ringAlpha;
-  if (pal.normalize) {
-    let alphaScale = pal.normalizeTarget / weight;
-    for (let i = 0; i < 8 && pal.ringAlpha * alphaScale > 1.0 && effPastel > 0; i++) {
-      effPastel = Math.max(0, effPastel - 0.07);
-      lut = buildPaletteLut(pal.stops, effPastel);
-      weight = lutPerceptualWeight(lut);
-      alphaScale = pal.normalizeTarget / weight;
+  // -- Perceptual weight normalization --
+  // "dark" backgrounds flip the weight metric (distance from black instead
+  // of distance from white) and, unless the caller pinned normalizeTarget
+  // explicitly, retarget to the siri reference weight measured with that
+  // same dark metric — so the default palette's scale stays exactly 1.0 on
+  // either background.
+  const DARK_BG = pal.background === "dark";
+  const NORM_TARGET =
+    options?.palette?.normalizeTarget !== undefined
+      ? pal.normalizeTarget
+      : DARK_BG
+        ? NORMALIZE_REF_DARK
+        : NORMALIZE_REF;
+
+  // Build the LUT + effective alpha/pastel for a stop array through the
+  // shared normalization pipeline — used at creation AND by setPalette, so a
+  // runtime palette swap lands on exactly the state a fresh instance with
+  // those stops would get.  Heavy (dark/saturated) palettes get their alpha
+  // scaled DOWN toward the target weight; light (near-background) palettes
+  // get alpha scaled UP, and if the 1.0 alpha cap still isn't enough, pastel
+  // is reduced stepwise (LUT rebuilt — 256 entries, negligible) to darken
+  // the colors themselves.  Palettes whose raw stops sit near the target
+  // may not reach it even at pastel 0 / alpha 1 — best effort is accepted.
+  //
+  // The pastel step-down is a LIGHT-metric lever only: lowering pastel
+  // darkens colors, which raises distance-from-white weight and shrinks
+  // alphaScale toward convergence.  Under the "dark" metric the relation
+  // inverts (lowering pastel LOWERS luminance weight and GROWS alphaScale —
+  // the loop would diverge, crushing the user's pastel to 0 for nothing), so
+  // on dark backgrounds the pastel is left untouched and the alpha clamp
+  // alone is the best effort.
+  const resolvePalette = (stops: EdgeAuraPaletteStops) => {
+    let effPastel = pal.pastel;
+    let lut = buildPaletteLut(stops, effPastel);
+    let weight = lutPerceptualWeight(lut, DARK_BG);
+    let effRingAlpha = pal.ringAlpha;
+    if (pal.normalize) {
+      let alphaScale = NORM_TARGET / weight;
+      if (!DARK_BG) {
+        for (let i = 0; i < 8 && pal.ringAlpha * alphaScale > 1.0 && effPastel > 0; i++) {
+          effPastel = Math.max(0, effPastel - 0.07);
+          lut = buildPaletteLut(stops, effPastel);
+          weight = lutPerceptualWeight(lut, DARK_BG);
+          alphaScale = NORM_TARGET / weight;
+        }
+      }
+      effRingAlpha = clamp(pal.ringAlpha * alphaScale, 0.3, 1.0);
     }
-    effRingAlpha = clamp(pal.ringAlpha * alphaScale, 0.3, 1.0);
-  }
-  const RING_ALPHA  = effRingAlpha;
-  const PALETTE_LUT = lut;
+    return { lut, weight, effRingAlpha, effPastel };
+  };
+
+  // Target palette state — mutable via setPalette.  weight / effRingAlpha /
+  // effPastel back getNormalization() and always describe the TARGET
+  // palette, even mid-crossfade.
+  let { lut: paletteLut, weight, effRingAlpha, effPastel } = resolvePalette(pal.stops);
+
+  // What rendering actually uses: during a crossfade paletteLut points at
+  // blendLut and renderRingAlpha lerps between the endpoints; steady-state
+  // both equal the target palette's values exactly.
+  let renderRingAlpha = effRingAlpha;
+
+  // Crossfade state (advanced in step(), dt-driven — never wall-clock).
+  // The two scratch LUTs are preallocated once so the per-frame blend never
+  // allocates.
+  let fadeActive = false;
+  let fadeElapsed = 0;
+  let fadeDur = 0;
+  let fadeFromRingAlpha = 0;
+  let fadeToLut = paletteLut;
+  let fadeToRingAlpha = effRingAlpha;
+  const fadeFromLut = new Uint8Array(LUT_SIZE * 3);
+  const blendLut = new Uint8Array(LUT_SIZE * 3);
 
   // -- Stable per-instance random phases (one per noise stream in neonAt) --
   // A finite `seed` swaps Math.random for a deterministic PRNG so tests/QA
@@ -841,9 +935,9 @@ export function createAuraEngine(
 
     const p = (((s / perimeter) + angle) % 1 + 1) % 1;
     const ci = Math.min(LUT_SIZE - 1, Math.max(0, Math.round(p * (LUT_SIZE - 1))));
-    np.r = PALETTE_LUT[ci * 3];
-    np.g = PALETTE_LUT[ci * 3 + 1];
-    np.b = PALETTE_LUT[ci * 3 + 2];
+    np.r = paletteLut[ci * 3];
+    np.g = paletteLut[ci * 3 + 1];
+    np.b = paletteLut[ci * 3 + 2];
 
     // Kindle reveal envelope. ABSOLUTE INVARIANT: when not kindling, env is
     // exactly 1 (skip the math entirely) so the rendered frame is byte-identical
@@ -1082,7 +1176,7 @@ export function createAuraEngine(
     const LT = W - 2 * RIM; // top/bottom straight length
     const LH = H - 2 * RIM; // left/right straight length
 
-    frameIntensity = intensity * RING_ALPHA;
+    frameIntensity = intensity * renderRingAlpha;
     perimeter = Math.max(1, 2 * LT + 2 * LH + 4 * ARC);
 
     // Arc-position offsets of the path segments (clockwise from the start of
@@ -1162,6 +1256,25 @@ export function createAuraEngine(
       // first-frame deltas) become 0 instead of corrupting the springs.
       const dt = Math.min(0.05, Math.max(0, dtMs / 1000) || 0);
       elapsed += dt;
+
+      // Advance the palette crossfade: lerp the LUT bytes + ring alpha from
+      // the fade-start snapshot toward the target.  On completion adopt the
+      // target state exactly, so steady frames are byte-identical to a fresh
+      // instance created with the new stops.
+      if (fadeActive) {
+        fadeElapsed += dt;
+        const f = fadeElapsed / fadeDur;
+        if (f >= 1) {
+          fadeActive = false;
+          paletteLut = fadeToLut;
+          renderRingAlpha = fadeToRingAlpha;
+        } else {
+          for (let i = 0; i < LUT_SIZE * 3; i++) {
+            blendLut[i] = Math.round(fadeFromLut[i] + f * (fadeToLut[i] - fadeFromLut[i]));
+          }
+          renderRingAlpha = fadeFromRingAlpha + f * (fadeToRingAlpha - fadeFromRingAlpha);
+        }
+      }
 
       // Advance the kindle reveal. progress eases to 1; the wavefront travels
       // to perimeter/2 + SOFT so the far point (max arc-distance = perimeter/2)
@@ -1280,8 +1393,53 @@ export function createAuraEngine(
       isTyping = on;
     },
 
+    setPalette(palette, opts) {
+      if (destroyed) return;
+
+      let stops: EdgeAuraPaletteStops;
+      if (typeof palette === "string") {
+        const preset = EDGE_AURA_PALETTES[palette];
+        if (!preset) {
+          throw new Error(`edge-aura: unknown palette preset "${palette}"`);
+        }
+        stops = preset;
+      } else {
+        validatePaletteStops(palette);
+        stops = palette;
+      }
+
+      // Same pipeline as creation — the target state is exactly what a
+      // fresh instance with these stops (and this instance's palette
+      // settings) would compute.
+      const next = resolvePalette(stops);
+      weight = next.weight;
+      effRingAlpha = next.effRingAlpha;
+      effPastel = next.effPastel;
+      fadeToLut = next.lut;
+      fadeToRingAlpha = next.effRingAlpha;
+
+      const crossfadeMs = opts?.crossfadeMs;
+      if (typeof crossfadeMs === "number" && Number.isFinite(crossfadeMs) && crossfadeMs > 0) {
+        // Snapshot whatever is currently rendered — mid-fade included — as
+        // the blend origin, then point rendering at the scratch LUT.  The
+        // scratch starts as an exact copy of the snapshot, so a render
+        // before the first step() (f = 0) shows no pop.
+        fadeFromLut.set(paletteLut);
+        fadeFromRingAlpha = renderRingAlpha;
+        blendLut.set(fadeFromLut);
+        paletteLut = blendLut;
+        fadeElapsed = 0;
+        fadeDur = crossfadeMs / 1000;
+        fadeActive = true;
+      } else {
+        fadeActive = false;
+        paletteLut = next.lut;
+        renderRingAlpha = next.effRingAlpha;
+      }
+    },
+
     getNormalization() {
-      return { weight, effRingAlpha: RING_ALPHA, effPastel };
+      return { weight, effRingAlpha, effPastel };
     },
 
     resize() {

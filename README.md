@@ -1,5 +1,10 @@
 # edge-aura
 
+[![npm version](https://img.shields.io/npm/v/edge-aura.svg)](https://www.npmjs.com/package/edge-aura)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
+
+<!-- hero image: docs/hero.png (added post-merge) -->
+
 An organic, Siri-style screen-edge glow: a rounded-rectangle "neon tube"
 hugging the viewport edges — a bright undulating core line plus a soft
 asymmetric bloom whose inner face dissolves with no perceptible end. The hue
@@ -62,6 +67,8 @@ Props (all optional):
 | Prop | Type | Default | Description |
 |---|---|---|---|
 | `state` | `"idle" \| "typing"` | `"idle"` | Drives palette rotation speed + `data-aura-state` |
+| `palette` | `EdgeAuraPaletteName \| EdgeAuraPaletteStops` | — | Ring palette — a preset name (e.g. `"ocean"`) or a raw stop array. **Reactive:** at mount it overrides `options.palette.stops`; on any later change the live engine crossfades to the new palette (350 ms). Changing it back to `undefined` keeps the current palette |
+| `active` | `boolean` | `true` | **Reactive:** `false` stops the animation loop and freezes the last rendered frame (the canvas is not cleared); `true` (re)starts it. `prefers-reduced-motion` wins — under it the loop never runs regardless |
 | `savedAt` | `number` | `0` | Marker that changes on each successful save; each change to a new non-zero value triggers one ambient pulse (suppressed while `state === "typing"`). The default `0` is a sentinel meaning "never pulse" — the FIRST change to a different value triggers a pulse. A timestamp (`Date.now()`) is the natural choice |
 | `options` | `EdgeAuraOptions` | `{}` | Engine tuning overrides (read once at mount) |
 | `eventPrefix` | `string` | `"aura"` | CustomEvent channel prefix |
@@ -92,7 +99,22 @@ engine.key(0.5);                  // 0..1 fraction across the bottom edge — ke
 engine.pulse();                   // ambient pulse (e.g. autosave success); pulse(energy) to override
 engine.setTyping(true);           // faster palette rotation while typing
 engine.kindle(700, 140);          // entrance: reveal the steady ring spreading from (x,y)
+
+// Swap the palette at runtime:
+engine.setPalette("ocean");                          // instant swap
+engine.setPalette(myStops, { crossfadeMs: 350 });    // …or blend over 350 ms
 ```
+
+`setPalette` accepts a preset name (resolved via `EDGE_AURA_PALETTES`) or a
+raw stop array, validated exactly like the creation-time option (structural
+garbage throws). The LUT is rebuilt through the same
+perceptual-normalization pipeline as creation, honoring the instance's
+`normalize` / `normalizeTarget` / `pastel` / `ringAlpha` / `background`
+settings — a runtime swap lands on exactly the state a fresh engine created
+with those stops would have. With `crossfadeMs` unset or `0` the swap is
+instant; with a positive value the rendered colors (and effective ring
+alpha) blend linearly from the old palette to the new one, advanced by
+`step()`.
 
 `engine.savedPulse()` remains as a deprecated alias of `pulse()`.
 
@@ -146,6 +168,37 @@ const engine = createAuraEngine(canvas, {
 | `nebula` | Dark saturated purples and blues |
 | `sakura` | Cherry-blossom pinks alternating with near-white blush |
 
+In React, prefer the reactive `palette` prop — changes crossfade instead of
+remounting.
+
+## Appearance presets
+
+Where palette presets change the *colors*, appearance presets change the
+*character*. `EDGE_AURA_PRESETS` exports four tuned `EdgeAuraOptions`
+bundles (typed name union: `EdgeAuraPresetName`), built only from the
+public options below — no hidden knobs:
+
+| Preset | Character |
+|---|---|
+| `subtle` | Quieter presence: translucent, heavily pastelled, gentle input response |
+| `vivid` | Punchier: near-raw colors, fully opaque core (sets `normalize: false` so alpha stays 1.0), bigger input swells, wider band |
+| `calm` | Slow ambient drift that barely reacts to input — a living picture frame |
+| `thin` | Delicate thin line: shallow band, tight inner dissolve, steadier core width |
+
+Presets are plain objects meant as **starting points to spread and
+override**:
+
+```ts
+import { createAuraEngine, EDGE_AURA_PRESETS, EDGE_AURA_PALETTES } from "edge-aura";
+
+const engine = createAuraEngine(canvas, {
+  ...EDGE_AURA_PRESETS.subtle,
+  palette: { ...EDGE_AURA_PRESETS.subtle.palette, stops: EDGE_AURA_PALETTES.ocean },
+});
+```
+
+(In React, pass the result as the `options` prop.)
+
 ## Options
 
 `createAuraEngine(canvas, options?)` — every option is optional; defaults are
@@ -193,7 +246,8 @@ should degrade gracefully on garbage numbers, not crash the host.
 | `coreWhiten` | `0.2` | How strongly the core line whitens toward 255 (neon feel) |
 | `ringAlpha` | `0.90` | Max alpha cap — the page always shows through slightly |
 | `normalize` | `true` | Perceptual weight normalization (see below) |
-| `normalizeTarget` | `NORMALIZE_REF` | Target perceptual weight (siri @ pastel 0.35) |
+| `normalizeTarget` | `NORMALIZE_REF` (`NORMALIZE_REF_DARK` when `background: "dark"`) | Target perceptual weight (siri @ pastel 0.35, measured against the configured background); an explicit value always wins |
+| `background` | `"light"` | Page background the normalization equalizes against — `"dark"` flips the weight metric to distance-from-black (see below) |
 
 ### `motion`
 
@@ -235,14 +289,30 @@ the engine equalizes this at creation time:
   light palette would need alpha > 1, *pastel is reduced* stepwise (−0.07,
   up to 8 LUT rebuilds) to darken the colors instead. Raw stops already near
   white may still fall short at pastel 0 / alpha 1 — best effort applies.
+  (The pastel lever only exists for the light metric: on `background:
+  "dark"` darkening colors would move weight *away* from the target, so
+  there the alpha clamp alone is the best effort and `pastel` is never
+  touched.)
 - The target defaults to `NORMALIZE_REF`, the weight of the stock `siri`
   palette at pastel 0.35, so the default palette is pixel-identical with
   normalization on or off.
 
+**Dark pages:** `palette: { background: "dark" }` flips the metric to
+distance-from-*black* (perceptual weight = mean `relativeLuminance`), so
+normalization equalizes palettes against dark backgrounds instead. The
+default target then becomes `NORMALIZE_REF_DARK` (the stock `siri` palette
+at pastel 0.35 measured with the dark metric), so the default palette again
+renders identically with normalization on or off; an explicit
+`normalizeTarget` still wins. Note that `pastel` always mixes stops toward
+*white*, which inherently reads stronger on dark backgrounds — that is a
+stylistic choice left to you (lower `pastel` if you want less of a whitened
+tint on dark pages).
+
 Disable with `palette: { normalize: false }`, or retune via
 `normalizeTarget`. The resolved values are inspectable via
 `engine.getNormalization()` → `{ weight, effRingAlpha, effPastel }`
-(diagnostic only).
+(diagnostic only; it reflects the current *target* palette as soon as a
+`setPalette` crossfade starts).
 
 ## Demo
 

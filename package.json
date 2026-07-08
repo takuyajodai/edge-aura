@@ -1,6 +1,6 @@
 {
   "name": "edge-aura",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Siri-style organic screen-edge glow — framework-agnostic Canvas 2D engine with spring physics, plus a thin React adapter.",
   "keywords": [
     "siri",
@@ -48,6 +48,8 @@
     "demo": "vite demo",
     "demo:build": "vite build demo",
     "check:dist": "node scripts/check-dist.mjs",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "prepublishOnly": "npm run typecheck && npm run build && npm run check:dist"
   },
   "peerDependencies": {
@@ -59,15 +61,19 @@
     }
   },
   "devDependencies": {
+    "@testing-library/dom": "^10.4.1",
+    "@testing-library/react": "^16.3.2",
     "@types/node": "^26.1.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^4.3.0",
+    "jsdom": "^29.1.1",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "tsdown": "^0.22.3",
     "typescript": "^5.8.0",
-    "vite": "^6.0.0"
+    "vite": "^6.0.0",
+    "vitest": "^3.2.7"
   },
   "engines": {
     "node": ">=18"

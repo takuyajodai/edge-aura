@@ -10,6 +10,7 @@ export {
   defineEdgeAuraOptions,
   EDGE_AURA_DEFAULTS,
   NORMALIZE_REF,
+  NORMALIZE_REF_DARK,
   type AuraEngine,
   type EdgeAuraOptions,
   type EdgeAuraGeometryOptions,
@@ -26,5 +27,10 @@ export {
   type PaletteStops,
   type EdgeAuraPaletteName,
 } from "./palettes";
+
+export {
+  EDGE_AURA_PRESETS,
+  type EdgeAuraPresetName,
+} from "./presets";
 
 export { keyCodeToPosition } from "./keyboard-map";
