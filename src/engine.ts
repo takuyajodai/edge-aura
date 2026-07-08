@@ -1,7 +1,8 @@
 /**
  * edge-aura — pure aura physics + rendering engine.  Framework-agnostic:
  * no React (or any other library) imports; the only platform dependencies
- * are `HTMLCanvasElement` and `window.innerWidth/Height`.
+ * are `HTMLCanvasElement`, `document` (offscreen buffer creation in mkBuf),
+ * and `window.innerWidth/Height`.
  *
  * Separation rationale: the physics/draw logic must be testable in isolation
  * (headless canvas, jsdom, or direct __auraEngine calls) without mounting a
@@ -1015,8 +1016,14 @@ export function createAuraEngine(
   // ---------------------------------------------------------------------------
   // Public methods
   // ---------------------------------------------------------------------------
+  // Defense in depth: after destroy(), step/render/renderStatic become no-ops
+  // so a stray host callback (e.g. an orphan rAF tick) can never draw into a
+  // cleared canvas.
+  let destroyed = false;
+
   const engine: AuraEngine = {
     step(dtMs: number) {
+      if (destroyed) return;
       const dt = Math.min(0.05, dtMs / 1000);
       elapsed += dt;
 
@@ -1064,10 +1071,12 @@ export function createAuraEngine(
     },
 
     render() {
+      if (destroyed) return;
       drawFrame(1);
     },
 
     renderStatic() {
+      if (destroyed) return;
       // Springs are all zero before any input, so the bumps vanish on their
       // own — only the ambient ring remains, dimmed for reduced-motion.
       drawFrame(0.6);
@@ -1142,6 +1151,7 @@ export function createAuraEngine(
     },
 
     destroy() {
+      destroyed = true;
       ctx.clearRect(0, 0, canvas.width, canvas.height);
     },
   };
@@ -1149,7 +1159,18 @@ export function createAuraEngine(
   // Dev-only QA probes (not part of the public AuraEngine contract): introspect
   // and force the kindle reveal state so the env≡1 invariant can be proven with
   // phase-stable, same-instance, same-elapsed A/B captures via __auraEngine.
-  if (process.env.NODE_ENV !== "production") {
+  //
+  // The env check is inlined at the use site (never hoisted into a module
+  // const): with the condition ending in the textual `process.env.NODE_ENV`
+  // comparison, a bundler `define` of NODE_ENV="production" makes the whole
+  // condition statically falsy, so minifiers drop this entire block from
+  // production bundles. The `typeof` guard keeps it crash-safe in unbundled
+  // browsers where `process` is undefined.
+  if (
+    typeof process !== "undefined" &&
+    !!process.env &&
+    process.env.NODE_ENV !== "production"
+  ) {
     const probes = engine as unknown as {
       __kindleState: () => unknown;
       __setKindle: (active: boolean, front: number) => void;
