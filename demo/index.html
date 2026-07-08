@@ -12,12 +12,8 @@
         background: #fff;
         color: #1c1917;
       }
-      /* The overlay the <EdgeAura> component renders into. The component
-         ships no styles — position it yourself (this is the recommended
-         full-viewport, click-through setup). */
-      .editing-aura { position: fixed; inset: 0; pointer-events: none; z-index: 40; }
-      .aura-canvas  { position: fixed; inset: 0; width: 100%; height: 100%; pointer-events: none; }
-
+      /* No aura CSS needed: <EdgeAura> ships inline default styles
+         (full-viewport, click-through overlay) — zero-config by design. */
       main {
         min-height: 100%;
         display: flex;
@@ -53,6 +49,25 @@
       }
       button.active { background: #1c1917; color: #fff; border-color: #1c1917; }
       .hint { font-size: 12px; color: #a8a29e; }
+      /* Dark page mode — paired with palette.background: "dark" in the demo. */
+      body.dark { background: #0c0a09; color: #fafaf9; }
+      body.dark p { color: #a8a29e; }
+      body.dark textarea {
+        background: #1c1917;
+        border-color: #292524;
+        color: #fafaf9;
+      }
+      body.dark button {
+        background: #1c1917;
+        border-color: #292524;
+        color: #fafaf9;
+      }
+      body.dark button.active {
+        background: #fafaf9;
+        color: #1c1917;
+        border-color: #fafaf9;
+      }
+      body.dark .hint { color: #57534e; }
     </style>
   </head>
   <body>

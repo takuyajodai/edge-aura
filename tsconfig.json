@@ -16,5 +16,5 @@
       "edge-aura/react": ["./src/react.tsx"]
     }
   },
-  "include": ["src", "demo", "tsdown.config.ts"]
+  "include": ["src", "demo", "test", "tsdown.config.ts", "vitest.config.ts"]
 }

@@ -1,7 +1,8 @@
 /**
  * edge-aura — pure aura physics + rendering engine.  Framework-agnostic:
  * no React (or any other library) imports; the only platform dependencies
- * are `HTMLCanvasElement` and `window.innerWidth/Height`.
+ * are `HTMLCanvasElement`, `document` (offscreen buffer creation in mkBuf),
+ * and `window.innerWidth/Height`.
  *
  * Separation rationale: the physics/draw logic must be testable in isolation
  * (headless canvas, jsdom, or direct __auraEngine calls) without mounting a
@@ -51,16 +52,21 @@
  * stiffness/damping pairs are internal tuning coupled to the decay rates.
  */
 
-import { EDGE_AURA_PALETTES, type EdgeAuraPaletteStop } from "./palettes";
+import {
+  EDGE_AURA_PALETTES,
+  type EdgeAuraPaletteName,
+  type EdgeAuraPaletteStop,
+  type EdgeAuraPaletteStops,
+} from "./palettes";
 
 // ---------------------------------------------------------------------------
 // Options
 // ---------------------------------------------------------------------------
 
-export type { EdgeAuraPaletteStop } from "./palettes";
+export type { EdgeAuraPaletteStop, EdgeAuraPaletteStops } from "./palettes";
 
 export interface EdgeAuraGeometryOptions {
-  /** Centerline inset from the viewport edges (px). Default 5. */
+  /** Centerline inset from the viewport edges (px). Default 3. */
   inset?: number;
   /**
    * Fade the composited aura to transparent over the topmost N px (0 =
@@ -94,9 +100,11 @@ export interface EdgeAuraGeometryOptions {
    */
   band?: number;
   /**
-   * Core line thickness: σ undulates along the ring within base ± var
-   * (1px-grid aliasing shimmers below ~1.3, so keep base − var above that).
-   * Defaults 1.55 / 0.35 → σ ∈ [1.2, 1.9].
+   * Core line thickness: σ undulates along the ring within base ± var.
+   * Defaults 1.6 / 0.6 → σ ∈ [1.0, 2.2]. Brief excursions to the ~1.0 thin
+   * extreme are part of the tuned organic look; values pinned below ~1.3
+   * for long stretches (e.g. a small base with var near 0) may show
+   * 1px-grid aliasing shimmer.
    */
   coreSigmaBase?: number;
   coreSigmaVar?: number;
@@ -116,7 +124,7 @@ export interface EdgeAuraPaletteOptions {
    * Gradient stops for the ring hue cycle (positions must start at 0 and end
    * at 1).  Default: Siri-style mesh gradient stops.
    */
-  stops?: EdgeAuraPaletteStop[];
+  stops?: EdgeAuraPaletteStops;
   /**
    * Pastel shift: mix every palette entry toward white at LUT build time —
    * tames raw vividness into a clean, modern tint (0 = original colors).
@@ -127,7 +135,7 @@ export interface EdgeAuraPaletteOptions {
   coreWhiten?: number;
   /**
    * Overall ring translucency — caps the maximum alpha so the page always
-   * shows through slightly (1 = fully opaque centerline). Default 0.8.
+   * shows through slightly (1 = fully opaque centerline). Default 0.9.
    */
   ringAlpha?: number;
   /**
@@ -139,10 +147,23 @@ export interface EdgeAuraPaletteOptions {
   normalize?: boolean;
   /**
    * Target perceptual weight for normalization. Default NORMALIZE_REF
-   * (the weight of the stock siri palette at pastel 0.35), so the default
-   * palette renders identically with normalization on or off.
+   * (the weight of the stock siri palette at pastel 0.35) on a "light"
+   * background, NORMALIZE_REF_DARK on a "dark" one, so the default palette
+   * renders identically with normalization on or off. An explicit value
+   * always wins over the background-derived default.
    */
   normalizeTarget?: number;
+  /**
+   * Page background the perceptual normalization equalizes against.
+   * "light" (the default) measures palette weight as distance from white
+   * (mean of 1 − relativeLuminance); "dark" flips the metric to distance
+   * from black (mean relativeLuminance) so palettes read with equal weight
+   * on dark pages. Note that `pastel` always mixes stops toward WHITE,
+   * which inherently reads stronger on dark backgrounds — that is a
+   * stylistic choice left to the user (lower `pastel` for dark pages if
+   * you want less of a whitened tint).
+   */
+  background?: "light" | "dark";
 }
 
 export interface EdgeAuraMotionOptions {
@@ -168,6 +189,12 @@ export interface EdgeAuraMotionOptions {
    * steady aura. Default 0.85.
    */
   kindleDurS?: number;
+  /**
+   * Soft width (px) of the kindle reveal wavefront — the envelope ramps from
+   * 0 to 1 over this arc-distance behind the front, so the ring kindles in
+   * instead of snapping on. Default 90.
+   */
+  kindleSoftPx?: number;
 }
 
 export interface EdgeAuraInputOptions {
@@ -196,6 +223,13 @@ export interface EdgeAuraOptions {
   palette?: EdgeAuraPaletteOptions;
   motion?: EdgeAuraMotionOptions;
   input?: EdgeAuraInputOptions;
+  /**
+   * Deterministic seed for the five per-instance noise phases: when set to a
+   * finite number, the phases derive from a tiny mulberry32 PRNG instead of
+   * Math.random() — for reproducible rendering in tests/QA. The phase range
+   * is identical either way. Default: unset (random phases per instance).
+   */
+  seed?: number;
 }
 
 /**
@@ -207,6 +241,17 @@ export interface EdgeAuraOptions {
  * exactly 1.0 — siri renders pixel-identically with normalization on.
  */
 export const NORMALIZE_REF = 0.25669334865196075;
+
+/**
+ * Dark-background counterpart of NORMALIZE_REF: the DARK perceptual weight
+ * (mean relativeLuminance over the 256 entries — distance from black) of the
+ * stock `siri` palette at the default pastel 0.35, computed offline the same
+ * way NORMALIZE_REF was (node script replicating buildPaletteLut +
+ * lutPerceptualWeight, full double precision).  Used as the default
+ * normalizeTarget when `palette.background` is "dark", so the default
+ * palette's normalization scale is exactly 1.0 there too.
+ */
+export const NORMALIZE_REF_DARK = 0.7433066513480395;
 
 // ---------------------------------------------------------------------------
 // Defaults — the exact original, pixel-QA'd values.
@@ -232,6 +277,7 @@ export const EDGE_AURA_DEFAULTS = {
     ringAlpha: 0.90,
     normalize: true,
     normalizeTarget: NORMALIZE_REF,
+    background: "light",
   },
   motion: {
     decay: 1.1,
@@ -240,6 +286,7 @@ export const EDGE_AURA_DEFAULTS = {
     rotateTypingS: 3,
     rotateIdleS: 8,
     kindleDurS: 0.85,
+    kindleSoftPx: 90,
   },
   input: {
     keySigma: 90,
@@ -283,18 +330,76 @@ function buildPaletteLut(stops: EdgeAuraPaletteStop[], pastel: number): Uint8Arr
 }
 
 /**
- * Perceptual weight of a built LUT: mean over the 256 entries of
- * (1 − relativeLuminance), with relativeLuminance = (0.2126·r + 0.7152·g +
- * 0.0722·b)/255.  Deliberately NOT gamma-decoded — sRGB-space luma is cheap
- * and monotonic in distance-from-white, which is all normalization needs.
+ * Perceptual weight of a built LUT, with relativeLuminance = (0.2126·r +
+ * 0.7152·g + 0.0722·b)/255.  On a "light" background the weight is the mean
+ * of (1 − relativeLuminance) — distance from white; on a "dark" one the
+ * metric flips to mean relativeLuminance — distance from black.
+ * Deliberately NOT gamma-decoded — sRGB-space luma is cheap and monotonic
+ * in distance-from-the-background, which is all normalization needs.
  */
-function lutPerceptualWeight(lut: Uint8Array): number {
+function lutPerceptualWeight(lut: Uint8Array, dark: boolean): number {
   let sum = 0;
   for (let i = 0; i < LUT_SIZE; i++) {
     const lum = (0.2126 * lut[i * 3] + 0.7152 * lut[i * 3 + 1] + 0.0722 * lut[i * 3 + 2]) / 255;
-    sum += 1 - lum;
+    sum += dark ? lum : 1 - lum;
   }
   return sum / LUT_SIZE;
+}
+
+/**
+ * Structural palette validation. A malformed stop array corrupts the LUT
+ * silently (NaN colors, wrapped seams), so structural garbage fails loudly
+ * at creation time — unlike numeric scalar options, which are merely clamped
+ * to safe minimums (a decorative overlay should degrade, not crash, on
+ * out-of-range numbers).
+ */
+function validatePaletteStops(stops: unknown): asserts stops is EdgeAuraPaletteStops {
+  if (!Array.isArray(stops) || stops.length < 2) {
+    throw new Error("edge-aura: palette stops must be an array of at least 2 entries");
+  }
+  let prevPos = -Infinity;
+  for (let i = 0; i < stops.length; i++) {
+    const stop: unknown = stops[i];
+    if (!Array.isArray(stop) || stop.length !== 2) {
+      throw new Error(`edge-aura: palette stop ${i} must be a [position, [r, g, b]] pair`);
+    }
+    const pos: unknown = stop[0];
+    const color: unknown = stop[1];
+    if (typeof pos !== "number" || !Number.isFinite(pos)) {
+      throw new Error(`edge-aura: palette stop ${i} position must be a finite number`);
+    }
+    if (pos < prevPos) {
+      throw new Error(`edge-aura: palette stop positions must be non-decreasing (stop ${i})`);
+    }
+    prevPos = pos;
+    if (
+      !Array.isArray(color) ||
+      color.length !== 3 ||
+      !color.every((c) => typeof c === "number" && Number.isFinite(c))
+    ) {
+      throw new Error(`edge-aura: palette stop ${i} color must be a 3-tuple of finite numbers`);
+    }
+  }
+  if ((stops[0] as [number, unknown])[0] !== 0) {
+    throw new Error("edge-aura: first palette stop position must be exactly 0");
+  }
+  if ((stops[stops.length - 1] as [number, unknown])[0] !== 1) {
+    throw new Error("edge-aura: last palette stop position must be exactly 1");
+  }
+}
+
+/**
+ * Tiny deterministic PRNG (mulberry32) backing the `seed` option — 32-bit
+ * state, zero dependencies, more than enough quality for five noise phases.
+ */
+function mulberry32(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), a | 1);
+    t = (t + Math.imul(t ^ (t >>> 7), t | 61)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
 }
 
 const HALF_PI = Math.PI / 2;
@@ -400,13 +505,19 @@ export interface AuraEngine {
   /** Inject tap energy and optionally update the hotspot target. */
   tap(point: { x: number; y: number } | null): void;
   /**
-   * Inject keystroke energy as an independent bottom-edge bump fixed at the
-   * key's x position (it rises and decays in place — it never travels).
-   * Only x (viewport fraction, mapped to a bottom-edge column) is used;
-   * y is accepted because hosts typically pass full caret coordinates.
+   * Inject keystroke energy as an independent bottom-edge bump. `x` is a
+   * 0..1 fraction mapped across the bottom edge (via keyXMin/keyXSpan); the
+   * bump is fixed at that position — it rises and decays in place, never
+   * traveling.
    */
-  key(x: number, y: number): void;
-  /** Inject save-pulse energy (+savedPulseEnergy). */
+  key(x: number): void;
+  /**
+   * Inject a gentle ambient energy pulse (e.g. "a save just succeeded"),
+   * capped at energyCap. Defaults to `input.savedPulseEnergy` when no
+   * amount is given.
+   */
+  pulse(energy?: number): void;
+  /** @deprecated Use {@link AuraEngine.pulse}. Alias kept for 0.1.x hosts. */
   savedPulse(): void;
   /**
    * Begin the entrance "kindle": the steady ring is revealed by a wavefront
@@ -414,11 +525,28 @@ export interface AuraEngine {
    * into the exact steady state with zero residual energy. Purely a reveal
    * envelope — injects NO energy. While kindling, per-position alpha is scaled
    * by the wavefront envelope; once complete, every frame is byte-identical to
-   * the steady aura. Call once on edit entry.
+   * the steady aura. Call once when the effect is activated.
    */
   kindle(x: number, y: number): void;
   /** Switch rotation speed between typing (fast) and idle (slow). */
   setTyping(on: boolean): void;
+  /**
+   * Swap the ring's palette at runtime. Accepts a preset name (resolved via
+   * EDGE_AURA_PALETTES) or a raw stop array (validated like the creation-time
+   * option — structural garbage throws). The LUT is rebuilt through the SAME
+   * perceptual-normalization pipeline as creation, honoring this instance's
+   * normalize / normalizeTarget / pastel / ringAlpha / background settings.
+   * With `crossfadeMs` unset or 0 the swap is instant; with a positive value
+   * the rendered LUT (and effective ring alpha) blends linearly from the old
+   * palette to the new one over that duration, advanced by step() — after the
+   * fade every frame is exactly the new palette's steady output.
+   * getNormalization() reflects the new (target) palette as soon as the fade
+   * starts.
+   */
+  setPalette(
+    palette: EdgeAuraPaletteName | EdgeAuraPaletteStops,
+    opts?: { crossfadeMs?: number },
+  ): void;
   /**
    * Diagnostic: resolved perceptual-normalization values — the final LUT
    * weight, effective ring alpha, and effective pastel actually used for
@@ -445,13 +573,29 @@ export function createAuraEngine(
   const mot = { ...EDGE_AURA_DEFAULTS.motion,   ...options?.motion };
   const inp = { ...EDGE_AURA_DEFAULTS.input,    ...options?.input };
 
+  // Structurally invalid palettes fail loudly; numeric scalars below are
+  // instead CLAMPED to safe minimums — this is a decorative library, so
+  // garbage numbers degrade gracefully rather than crash the host.
+  validatePaletteStops(pal.stops);
+
+  // Non-finite scalars (NaN/Infinity) would slip through a bare Math.max
+  // (Math.max(min, NaN) === NaN) and either crash buffer allocation or
+  // silently poison the energy math forever — fall back to the default
+  // instead, consistent with the graceful-degradation contract above.
+  const clampOpt = (v: number, min: number, fallback: number): number =>
+    Number.isFinite(v) ? Math.max(min, v) : fallback;
+
+  const DEF_GEO = EDGE_AURA_DEFAULTS.geometry;
+  const DEF_MOT = EDGE_AURA_DEFAULTS.motion;
+  const DEF_INP = EDGE_AURA_DEFAULTS.input;
+
   // Geometry: centerline rounded rect inset INSET px from the viewport edges
   // with corner radius CR.  RIM = INSET + CR is the distance from a screen
   // edge to a corner-arc center (and the strip/corner tiling offset).
-  const INSET = geo.inset;
-  const CR = geo.cornerRadius;
+  const INSET = clampOpt(geo.inset, 0, DEF_GEO.inset);
+  const CR = clampOpt(geo.cornerRadius, 0, DEF_GEO.cornerRadius);
   const RIM = INSET + CR;
-  const BAND = geo.band;
+  const BAND = clampOpt(geo.band, 8, DEF_GEO.band);
   const TOP_FADE = geo.topEdgeFade ?? 0;
   const TOP_CORNER_FADE = geo.topCornerFade ?? 0;
   // Corner buffer size: exactly the RIM×RIM quadrant nearest the screen
@@ -466,55 +610,111 @@ export function createAuraEngine(
   const CORE_SIGMA_VAR  = geo.coreSigmaVar;
   const INNER_SOFT_BASE = geo.innerSoftBase;
   const INNER_SOFT_VAR  = geo.innerSoftVar;
-  const INNER_SIGMA_MAX = geo.innerSigmaMax;
+  const INNER_SIGMA_MAX = clampOpt(geo.innerSigmaMax, 1, DEF_GEO.innerSigmaMax);
 
-  const KEY_SIGMA = inp.keySigma;
-  const TAP_SIGMA = inp.tapSigma;
+  const KEY_SIGMA = clampOpt(inp.keySigma, 1, DEF_INP.keySigma);
+  const TAP_SIGMA = clampOpt(inp.tapSigma, 1, DEF_INP.tapSigma);
   const TAP_ENERGY         = inp.tapEnergy;
   const KEY_ENERGY         = inp.keyEnergy;
   const SAVED_PULSE_ENERGY = inp.savedPulseEnergy;
   const KEY_X_MIN  = inp.keyXMin;
   const KEY_X_SPAN = inp.keyXSpan;
 
-  const ENERGY_CAP = mot.energyCap;
-  const DECAY      = mot.decay;
-  const KEY_DECAY  = mot.keyDecay;
-  const ROTATE_TYPING_S = mot.rotateTypingS;
-  const ROTATE_IDLE_S   = mot.rotateIdleS;
-  const KINDLE_DUR      = mot.kindleDurS;
-  // Soft width (px) of the reveal wavefront — the envelope ramps from 0 to 1
-  // over this arc-distance behind the front, so the ring kindles in instead of
-  // snapping on.
-  const KINDLE_SOFT = 90;
+  // energyCap must stay strictly positive (it caps every energy injection).
+  const ENERGY_CAP = clampOpt(mot.energyCap, 1e-3, DEF_MOT.energyCap);
+  // Decay rates have no minimum, but a NaN here would make every energy
+  // store NaN forever (NaN never decays) — finite-guard to the defaults.
+  const DECAY      = Number.isFinite(mot.decay) ? mot.decay : DEF_MOT.decay;
+  const KEY_DECAY  = Number.isFinite(mot.keyDecay) ? mot.keyDecay : DEF_MOT.keyDecay;
+  const ROTATE_TYPING_S = clampOpt(mot.rotateTypingS, 0.05, DEF_MOT.rotateTypingS);
+  const ROTATE_IDLE_S   = clampOpt(mot.rotateIdleS, 0.05, DEF_MOT.rotateIdleS);
+  const KINDLE_DUR      = clampOpt(mot.kindleDurS, 0.05, DEF_MOT.kindleDurS);
+  // Divisor in the kindle envelope — clamp like the other pixel-scale sigmas.
+  const KINDLE_SOFT     = clampOpt(mot.kindleSoftPx, 1, DEF_MOT.kindleSoftPx);
 
   const CORE_WHITEN = pal.coreWhiten;
 
-  // -- Perceptual weight normalization (one-time, at creation) --
-  // Heavy (dark/saturated) palettes get their alpha scaled DOWN toward the
-  // target weight; light (near-white) palettes get alpha scaled UP, and if
-  // the 1.0 alpha cap still isn't enough, pastel is reduced stepwise (LUT
-  // rebuilt — 256 entries, negligible) to darken the colors themselves.
-  // Palettes whose raw stops are already near white may not reach the
-  // target even at pastel 0 / alpha 1 — best effort is accepted.
-  let effPastel = pal.pastel;
-  let lut = buildPaletteLut(pal.stops, effPastel);
-  let weight = lutPerceptualWeight(lut);
-  let effRingAlpha = pal.ringAlpha;
-  if (pal.normalize) {
-    let alphaScale = pal.normalizeTarget / weight;
-    for (let i = 0; i < 8 && pal.ringAlpha * alphaScale > 1.0 && effPastel > 0; i++) {
-      effPastel = Math.max(0, effPastel - 0.07);
-      lut = buildPaletteLut(pal.stops, effPastel);
-      weight = lutPerceptualWeight(lut);
-      alphaScale = pal.normalizeTarget / weight;
+  // -- Perceptual weight normalization --
+  // "dark" backgrounds flip the weight metric (distance from black instead
+  // of distance from white) and, unless the caller pinned normalizeTarget
+  // explicitly, retarget to the siri reference weight measured with that
+  // same dark metric — so the default palette's scale stays exactly 1.0 on
+  // either background.
+  const DARK_BG = pal.background === "dark";
+  const NORM_TARGET =
+    options?.palette?.normalizeTarget !== undefined
+      ? pal.normalizeTarget
+      : DARK_BG
+        ? NORMALIZE_REF_DARK
+        : NORMALIZE_REF;
+
+  // Build the LUT + effective alpha/pastel for a stop array through the
+  // shared normalization pipeline — used at creation AND by setPalette, so a
+  // runtime palette swap lands on exactly the state a fresh instance with
+  // those stops would get.  Heavy (dark/saturated) palettes get their alpha
+  // scaled DOWN toward the target weight; light (near-background) palettes
+  // get alpha scaled UP, and if the 1.0 alpha cap still isn't enough, pastel
+  // is reduced stepwise (LUT rebuilt — 256 entries, negligible) to darken
+  // the colors themselves.  Palettes whose raw stops sit near the target
+  // may not reach it even at pastel 0 / alpha 1 — best effort is accepted.
+  //
+  // The pastel step-down is a LIGHT-metric lever only: lowering pastel
+  // darkens colors, which raises distance-from-white weight and shrinks
+  // alphaScale toward convergence.  Under the "dark" metric the relation
+  // inverts (lowering pastel LOWERS luminance weight and GROWS alphaScale —
+  // the loop would diverge, crushing the user's pastel to 0 for nothing), so
+  // on dark backgrounds the pastel is left untouched and the alpha clamp
+  // alone is the best effort.
+  const resolvePalette = (stops: EdgeAuraPaletteStops) => {
+    let effPastel = pal.pastel;
+    let lut = buildPaletteLut(stops, effPastel);
+    let weight = lutPerceptualWeight(lut, DARK_BG);
+    let effRingAlpha = pal.ringAlpha;
+    if (pal.normalize) {
+      let alphaScale = NORM_TARGET / weight;
+      if (!DARK_BG) {
+        for (let i = 0; i < 8 && pal.ringAlpha * alphaScale > 1.0 && effPastel > 0; i++) {
+          effPastel = Math.max(0, effPastel - 0.07);
+          lut = buildPaletteLut(stops, effPastel);
+          weight = lutPerceptualWeight(lut, DARK_BG);
+          alphaScale = NORM_TARGET / weight;
+        }
+      }
+      effRingAlpha = clamp(pal.ringAlpha * alphaScale, 0.3, 1.0);
     }
-    effRingAlpha = clamp(pal.ringAlpha * alphaScale, 0.3, 1.0);
-  }
-  const RING_ALPHA  = effRingAlpha;
-  const PALETTE_LUT = lut;
+    return { lut, weight, effRingAlpha, effPastel };
+  };
+
+  // Target palette state — mutable via setPalette.  weight / effRingAlpha /
+  // effPastel back getNormalization() and always describe the TARGET
+  // palette, even mid-crossfade.
+  let { lut: paletteLut, weight, effRingAlpha, effPastel } = resolvePalette(pal.stops);
+
+  // What rendering actually uses: during a crossfade paletteLut points at
+  // blendLut and renderRingAlpha lerps between the endpoints; steady-state
+  // both equal the target palette's values exactly.
+  let renderRingAlpha = effRingAlpha;
+
+  // Crossfade state (advanced in step(), dt-driven — never wall-clock).
+  // The two scratch LUTs are preallocated once so the per-frame blend never
+  // allocates.
+  let fadeActive = false;
+  let fadeElapsed = 0;
+  let fadeDur = 0;
+  let fadeFromRingAlpha = 0;
+  let fadeToLut = paletteLut;
+  let fadeToRingAlpha = effRingAlpha;
+  const fadeFromLut = new Uint8Array(LUT_SIZE * 3);
+  const blendLut = new Uint8Array(LUT_SIZE * 3);
 
   // -- Stable per-instance random phases (one per noise stream in neonAt) --
-  const phase = Array.from({ length: 5 }, () => Math.random() * 80);
+  // A finite `seed` swaps Math.random for a deterministic PRNG so tests/QA
+  // can reproduce exact pixels; the phase range (x * 80) is identical.
+  const rand =
+    typeof options?.seed === "number" && Number.isFinite(options.seed)
+      ? mulberry32(options.seed)
+      : Math.random;
+  const phase = Array.from({ length: 5 }, () => rand() * 80);
 
   // Full resolution: the scanline renderer is cheap enough to skip a
   // quarter-res downsample, and full-res strips avoid interpolation seams.
@@ -553,6 +753,13 @@ export function createAuraEngine(
     return { img: cx.createImageData(w, h), cv, cx };
   };
 
+  // Cached fade gradients (destination-out erasers for the chrome-sampler
+  // guards below) — rebuilt in allocBuffers, which runs on every size change,
+  // so drawFrame never constructs CanvasGradient objects per frame.
+  let topFadeGradient: CanvasGradient | null = null;
+  let topCornerFadeL: CanvasGradient | null = null;
+  let topCornerFadeR: CanvasGradient | null = null;
+
   const allocBuffers = () => {
     const W = canvas.width, H = canvas.height;
     stripTop    = mkBuf(W - 2 * RIM, BAND);
@@ -563,6 +770,32 @@ export function createAuraEngine(
     cornerTR = mkBuf(CQ, CQ);
     cornerBR = mkBuf(CQ, CQ);
     cornerBL = mkBuf(CQ, CQ);
+
+    // (Re)build the fade gradients for this canvas size: the linear top fade
+    // is size-independent (cheap to rebuild anyway); the corner radials
+    // anchor at x = 0 and x = W.  Both ramp: fully erased for the inner 40%,
+    // untouched beyond the fade distance.
+    topFadeGradient = null;
+    if (TOP_FADE > 0) {
+      const g = ctx.createLinearGradient(0, 0, 0, TOP_FADE);
+      g.addColorStop(0, "rgba(0,0,0,1)");
+      g.addColorStop(0.4, "rgba(0,0,0,1)");
+      g.addColorStop(1, "rgba(0,0,0,0)");
+      topFadeGradient = g;
+    }
+    topCornerFadeL = null;
+    topCornerFadeR = null;
+    if (TOP_CORNER_FADE > 0) {
+      const mkRadial = (cornerX: number) => {
+        const g = ctx.createRadialGradient(cornerX, 0, 0, cornerX, 0, TOP_CORNER_FADE);
+        g.addColorStop(0, "rgba(0,0,0,1)");
+        g.addColorStop(0.4, "rgba(0,0,0,1)");
+        g.addColorStop(1, "rgba(0,0,0,0)");
+        return g;
+      };
+      topCornerFadeL = mkRadial(0);
+      topCornerFadeR = mkRadial(W);
+    }
   };
 
   {
@@ -594,7 +827,8 @@ export function createAuraEngine(
   const sBurst = mkSpring(46, 10);
   const sHot   = mkSpring(34, 8);
 
-  // 2-D glide spring for tap-hotspot (caret edge projection).
+  // 2-D glide spring for the tap hotspot (the tap point projected to its
+  // nearest edge).
   const pos: Spring2D = { x: window.innerWidth / 2, y: window.innerHeight, vx: 0, vy: 0, k: 16,  c: 7.5 };
 
   let tapPoint: { x: number; y: number } | null = null;
@@ -701,9 +935,9 @@ export function createAuraEngine(
 
     const p = (((s / perimeter) + angle) % 1 + 1) % 1;
     const ci = Math.min(LUT_SIZE - 1, Math.max(0, Math.round(p * (LUT_SIZE - 1))));
-    np.r = PALETTE_LUT[ci * 3];
-    np.g = PALETTE_LUT[ci * 3 + 1];
-    np.b = PALETTE_LUT[ci * 3 + 2];
+    np.r = paletteLut[ci * 3];
+    np.g = paletteLut[ci * 3 + 1];
+    np.b = paletteLut[ci * 3 + 2];
 
     // Kindle reveal envelope. ABSOLUTE INVARIANT: when not kindling, env is
     // exactly 1 (skip the math entirely) so the rendered frame is byte-identical
@@ -838,18 +1072,26 @@ export function createAuraEngine(
     W: number, H: number,
     sRight0: number, sBottom0: number, sLeft0: number,
   ) => {
-    const topW = stripTop ? stripTop.cv.width : 0;
+    // Byte layout derives from each strip's OWN buffer dimensions — never a
+    // sibling's — so a change to one allocation can never silently corrupt
+    // another strip's indexing. (Top/bottom widths are equal today, as are
+    // left/right; that is an allocation detail, not a layout contract.)
+    const topW   = stripTop    ? stripTop.cv.width     : 0;
+    const botW   = stripBottom ? stripBottom.cv.width  : 0;
+    const botH   = stripBottom ? stripBottom.cv.height : 0;
+    const leftW  = stripLeft   ? stripLeft.cv.width    : 0;
+    const rightW = stripRight  ? stripRight.cv.width   : 0;
     // Clockwise s direction: top and right run with increasing coordinate,
     // bottom and left run against it.
     const strips: StripCfg[] = [
       { buf: stripTop,    edgeId: TOP,    sBase: -RIM,               sDir:  1, limit: W, ownBias: 1,
-        base0: 0,                     basePerI: 4,        strideBytes:  topW * 4 },
+        base0: 0,                    basePerI: 4,          strideBytes:  topW * 4 },
       { buf: stripBottom, edgeId: BOTTOM, sBase: sBottom0 + W - RIM, sDir: -1, limit: W, ownBias: 1,
-        base0: (BAND - 1) * topW * 4, basePerI: 4,        strideBytes: -topW * 4 },
+        base0: (botH - 1) * botW * 4, basePerI: 4,         strideBytes: -botW * 4 },
       { buf: stripLeft,   edgeId: LEFT,   sBase: sLeft0 + H - RIM,   sDir: -1, limit: H, ownBias: 0,
-        base0: 0,                     basePerI: BAND * 4, strideBytes:  4 },
+        base0: 0,                    basePerI: leftW * 4,  strideBytes:  4 },
       { buf: stripRight,  edgeId: RIGHT,  sBase: sRight0 - RIM,      sDir:  1, limit: H, ownBias: 0,
-        base0: (BAND - 1) * 4,        basePerI: BAND * 4, strideBytes: -4 },
+        base0: (rightW - 1) * 4,     basePerI: rightW * 4, strideBytes: -4 },
     ];
     for (const cfg of strips) drawStrip(cfg);
   };
@@ -934,7 +1176,7 @@ export function createAuraEngine(
     const LT = W - 2 * RIM; // top/bottom straight length
     const LH = H - 2 * RIM; // left/right straight length
 
-    frameIntensity = intensity * RING_ALPHA;
+    frameIntensity = intensity * renderRingAlpha;
     perimeter = Math.max(1, 2 * LT + 2 * LH + 4 * ARC);
 
     // Arc-position offsets of the path segments (clockwise from the start of
@@ -953,14 +1195,11 @@ export function createAuraEngine(
     // their window chrome from the page's top pixels (Arc, Safari-style)
     // see neutral canvas instead of the animated glow. Fully erased for the
     // first 40% of the strip, ramping to untouched at TOP_FADE px.
-    if (TOP_FADE > 0) {
-      const g = ctx.createLinearGradient(0, 0, 0, TOP_FADE);
-      g.addColorStop(0, "rgba(0,0,0,1)");
-      g.addColorStop(0.4, "rgba(0,0,0,1)");
-      g.addColorStop(1, "rgba(0,0,0,0)");
+    // (Gradients are cached — built in allocBuffers on every size change.)
+    if (topFadeGradient) {
       ctx.save();
       ctx.globalCompositeOperation = "destination-out";
-      ctx.fillStyle = g;
+      ctx.fillStyle = topFadeGradient;
       ctx.fillRect(0, 0, W, TOP_FADE);
       ctx.restore();
     }
@@ -970,23 +1209,13 @@ export function createAuraEngine(
     // at its right end, and the side glows below TOP_FADE would otherwise
     // still feed them. Radial: fully erased for the inner 40%, untouched
     // beyond TOP_CORNER_FADE px from the corner point.
-    if (TOP_CORNER_FADE > 0) {
+    if (topCornerFadeL && topCornerFadeR) {
       ctx.save();
       ctx.globalCompositeOperation = "destination-out";
-      for (const cornerX of [0, W]) {
-        const g = ctx.createRadialGradient(
-          cornerX, 0, 0,
-          cornerX, 0, TOP_CORNER_FADE
-        );
-        g.addColorStop(0, "rgba(0,0,0,1)");
-        g.addColorStop(0.4, "rgba(0,0,0,1)");
-        g.addColorStop(1, "rgba(0,0,0,0)");
-        ctx.fillStyle = g;
-        ctx.fillRect(
-          cornerX === 0 ? 0 : W - TOP_CORNER_FADE, 0,
-          TOP_CORNER_FADE, TOP_CORNER_FADE
-        );
-      }
+      ctx.fillStyle = topCornerFadeL;
+      ctx.fillRect(0, 0, TOP_CORNER_FADE, TOP_CORNER_FADE);
+      ctx.fillStyle = topCornerFadeR;
+      ctx.fillRect(W - TOP_CORNER_FADE, 0, TOP_CORNER_FADE, TOP_CORNER_FADE);
       ctx.restore();
     }
   };
@@ -1015,10 +1244,37 @@ export function createAuraEngine(
   // ---------------------------------------------------------------------------
   // Public methods
   // ---------------------------------------------------------------------------
+  // Defense in depth: after destroy(), step/render/renderStatic become no-ops
+  // so a stray host callback (e.g. an orphan rAF tick) can never draw into a
+  // cleared canvas.
+  let destroyed = false;
+
   const engine: AuraEngine = {
     step(dtMs: number) {
-      const dt = Math.min(0.05, dtMs / 1000);
+      if (destroyed) return;
+      // Clamp dt to [0, 50ms]: negative and NaN dtMs (host clock glitches,
+      // first-frame deltas) become 0 instead of corrupting the springs.
+      const dt = Math.min(0.05, Math.max(0, dtMs / 1000) || 0);
       elapsed += dt;
+
+      // Advance the palette crossfade: lerp the LUT bytes + ring alpha from
+      // the fade-start snapshot toward the target.  On completion adopt the
+      // target state exactly, so steady frames are byte-identical to a fresh
+      // instance created with the new stops.
+      if (fadeActive) {
+        fadeElapsed += dt;
+        const f = fadeElapsed / fadeDur;
+        if (f >= 1) {
+          fadeActive = false;
+          paletteLut = fadeToLut;
+          renderRingAlpha = fadeToRingAlpha;
+        } else {
+          for (let i = 0; i < LUT_SIZE * 3; i++) {
+            blendLut[i] = Math.round(fadeFromLut[i] + f * (fadeToLut[i] - fadeFromLut[i]));
+          }
+          renderRingAlpha = fadeFromRingAlpha + f * (fadeToRingAlpha - fadeFromRingAlpha);
+        }
+      }
 
       // Advance the kindle reveal. progress eases to 1; the wavefront travels
       // to perimeter/2 + SOFT so the far point (max arc-distance = perimeter/2)
@@ -1064,10 +1320,12 @@ export function createAuraEngine(
     },
 
     render() {
+      if (destroyed) return;
       drawFrame(1);
     },
 
     renderStatic() {
+      if (destroyed) return;
       // Springs are all zero before any input, so the bumps vanish on their
       // own — only the ambient ring remains, dimmed for reduced-motion.
       drawFrame(0.6);
@@ -1078,9 +1336,7 @@ export function createAuraEngine(
       energy = Math.min(energy + TAP_ENERGY, ENERGY_CAP);
     },
 
-    key(x, _y) {
-      // Only x drives the bottom-edge bump; y is accepted but unread (the
-      // host passes full caret coordinates — see the interface doc).
+    key(x) {
       // The pixel position is fixed at press time: bumps never travel.
       const tanX = (KEY_X_MIN + KEY_X_SPAN * x) * window.innerWidth;
 
@@ -1108,8 +1364,16 @@ export function createAuraEngine(
       slot.energy = Math.min(KEY_ENERGY, ENERGY_CAP);
     },
 
+    pulse(amount?: number) {
+      // Non-finite input would poison the shared energy store (NaN never
+      // decays) — degrade to the default pulse energy instead.
+      const e = Number.isFinite(amount) ? Math.max(0, amount!) : SAVED_PULSE_ENERGY;
+      energy = Math.min(energy + e, ENERGY_CAP);
+    },
+
     savedPulse() {
-      energy = Math.min(energy + SAVED_PULSE_ENERGY, ENERGY_CAP);
+      // Deprecated alias — see the interface doc.
+      engine.pulse();
     },
 
     kindle(x, y) {
@@ -1129,8 +1393,53 @@ export function createAuraEngine(
       isTyping = on;
     },
 
+    setPalette(palette, opts) {
+      if (destroyed) return;
+
+      let stops: EdgeAuraPaletteStops;
+      if (typeof palette === "string") {
+        const preset = EDGE_AURA_PALETTES[palette];
+        if (!preset) {
+          throw new Error(`edge-aura: unknown palette preset "${palette}"`);
+        }
+        stops = preset;
+      } else {
+        validatePaletteStops(palette);
+        stops = palette;
+      }
+
+      // Same pipeline as creation — the target state is exactly what a
+      // fresh instance with these stops (and this instance's palette
+      // settings) would compute.
+      const next = resolvePalette(stops);
+      weight = next.weight;
+      effRingAlpha = next.effRingAlpha;
+      effPastel = next.effPastel;
+      fadeToLut = next.lut;
+      fadeToRingAlpha = next.effRingAlpha;
+
+      const crossfadeMs = opts?.crossfadeMs;
+      if (typeof crossfadeMs === "number" && Number.isFinite(crossfadeMs) && crossfadeMs > 0) {
+        // Snapshot whatever is currently rendered — mid-fade included — as
+        // the blend origin, then point rendering at the scratch LUT.  The
+        // scratch starts as an exact copy of the snapshot, so a render
+        // before the first step() (f = 0) shows no pop.
+        fadeFromLut.set(paletteLut);
+        fadeFromRingAlpha = renderRingAlpha;
+        blendLut.set(fadeFromLut);
+        paletteLut = blendLut;
+        fadeElapsed = 0;
+        fadeDur = crossfadeMs / 1000;
+        fadeActive = true;
+      } else {
+        fadeActive = false;
+        paletteLut = next.lut;
+        renderRingAlpha = next.effRingAlpha;
+      }
+    },
+
     getNormalization() {
-      return { weight, effRingAlpha: RING_ALPHA, effPastel };
+      return { weight, effRingAlpha, effPastel };
     },
 
     resize() {
@@ -1142,6 +1451,7 @@ export function createAuraEngine(
     },
 
     destroy() {
+      destroyed = true;
       ctx.clearRect(0, 0, canvas.width, canvas.height);
     },
   };
@@ -1149,7 +1459,18 @@ export function createAuraEngine(
   // Dev-only QA probes (not part of the public AuraEngine contract): introspect
   // and force the kindle reveal state so the env≡1 invariant can be proven with
   // phase-stable, same-instance, same-elapsed A/B captures via __auraEngine.
-  if (process.env.NODE_ENV !== "production") {
+  //
+  // The env check is inlined at the use site (never hoisted into a module
+  // const): with the condition ending in the textual `process.env.NODE_ENV`
+  // comparison, a bundler `define` of NODE_ENV="production" makes the whole
+  // condition statically falsy, so minifiers drop this entire block from
+  // production bundles. The `typeof` guard keeps it crash-safe in unbundled
+  // browsers where `process` is undefined.
+  if (
+    typeof process !== "undefined" &&
+    !!process.env &&
+    process.env.NODE_ENV !== "production"
+  ) {
     const probes = engine as unknown as {
       __kindleState: () => unknown;
       __setKindle: (active: boolean, front: number) => void;
