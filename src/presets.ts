@@ -38,7 +38,12 @@ export const EDGE_AURA_PRESETS = {
   },
   /** Delicate thin line: shallow band, tight inner dissolve, steadier core width. */
   thin: {
-    geometry: { band: 44, innerSigmaMax: 9, coreSigmaVar: 0.25 },
+    // innerSigmaMax is intentionally NOT set: the bloom depth profile now scales
+    // self-similarly with `band`, so at band 44 the effective inner cap is
+    // already 44/76·17 ≈ 9.8 — the old manual `innerSigmaMax: 9` was a hand-rolled
+    // approximation of exactly that scaling and would now double-shrink the tail.
+    // coreSigmaVar stays absolute (core thickness does not scale with band).
+    geometry: { band: 44, coreSigmaVar: 0.25 },
   },
 } satisfies Record<string, EdgeAuraOptions>;
 
