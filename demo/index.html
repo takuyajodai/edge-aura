@@ -3,72 +3,47 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>edge-aura — demo</title>
-    <style>
-      * { box-sizing: border-box; margin: 0; }
-      html, body { height: 100%; }
-      body {
-        font-family: system-ui, -apple-system, sans-serif;
-        background: #fff;
-        color: #1c1917;
-      }
-      /* No aura CSS needed: <EdgeAura> ships inline default styles
-         (full-viewport, click-through overlay) — zero-config by design. */
-      main {
-        min-height: 100%;
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        justify-content: center;
-        gap: 20px;
-        padding: 48px 24px;
-        text-align: center;
-      }
-      h1 { font-size: 40px; letter-spacing: -0.02em; }
-      p  { color: #57534e; max-width: 460px; line-height: 1.7; }
-      textarea {
-        width: min(460px, 90vw);
-        height: 96px;
-        font: inherit;
-        padding: 12px 14px;
-        border: 1px solid #e7e5e4;
-        border-radius: 12px;
-        outline: none;
-        resize: none;
-      }
-      .row { display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; }
-      button {
-        font: inherit;
-        font-size: 13px;
-        font-weight: 600;
-        padding: 7px 14px;
-        border-radius: 999px;
-        border: 1px solid #e7e5e4;
-        background: #fff;
-        cursor: pointer;
-      }
-      button.active { background: #1c1917; color: #fff; border-color: #1c1917; }
-      .hint { font-size: 12px; color: #a8a29e; }
-      /* Dark page mode — paired with palette.background: "dark" in the demo. */
-      body.dark { background: #0c0a09; color: #fafaf9; }
-      body.dark p { color: #a8a29e; }
-      body.dark textarea {
-        background: #1c1917;
-        border-color: #292524;
-        color: #fafaf9;
-      }
-      body.dark button {
-        background: #1c1917;
-        border-color: #292524;
-        color: #fafaf9;
-      }
-      body.dark button.active {
-        background: #fafaf9;
-        color: #1c1917;
-        border-color: #fafaf9;
-      }
-      body.dark .hint { color: #57534e; }
-    </style>
+    <meta
+      name="description"
+      content="edge-aura — an organic glow that hugs the edges of your screen. Zero-dependency Canvas 2D engine with a thin React adapter."
+    />
+    <title>edge-aura — organic screen-edge glow</title>
+    <!--
+      Pre-paint bootstrap: set data-theme and lang on <html> synchronously,
+      before first paint, so a saved/OS-dark visitor never sees a white flash
+      and ja visitors never get the wrong lang attribute. Mirrors
+      detectTheme()/detectLang() in main.tsx — the React effects that set these
+      then become idempotent confirmations rather than the first application.
+    -->
+    <script>
+      (function () {
+        var d = document.documentElement;
+        var theme;
+        try {
+          theme = localStorage.getItem("edge-aura-demo-theme");
+        } catch (e) {}
+        if (theme !== "light" && theme !== "dark") {
+          theme =
+            window.matchMedia &&
+            window.matchMedia("(prefers-color-scheme: dark)").matches
+              ? "dark"
+              : "light";
+        }
+        d.dataset.theme = theme;
+
+        var lang;
+        try {
+          lang = localStorage.getItem("edge-aura-demo-lang");
+        } catch (e) {}
+        if (lang !== "en" && lang !== "ja") {
+          lang =
+            (navigator.language || "").toLowerCase().indexOf("ja") === 0
+              ? "ja"
+              : "en";
+        }
+        d.lang = lang;
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>
