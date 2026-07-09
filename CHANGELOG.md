@@ -5,6 +5,59 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-07-09
+
+### Added
+
+- Dark-background rendering pipeline (all gated on
+  `palette.background: "dark"`): `darkAlphaGamma` (default `0.55`) remaps the
+  emitted alpha through a concave curve so the bloom survives sRGB
+  source-over compositing on dark pages (the halo was previously 2.8–6.9×
+  too dark); `darkChroma` (default `1.15`) applies a lightness-preserving
+  Oklab chroma lift to the LUT; the dark default `coreWhiten` rises to
+  `0.32` and the normalization alpha floor to `0.45`; opt-in
+  `palette.blendMode: "screen" | "plus-lighter"` sets an additive
+  `mix-blend-mode` on the canvas (never applied on light backgrounds).
+- `palette.interpolation: "srgb" | "oklab"` — opt-in Oklab LUT
+  interpolation for custom palettes with widely-spaced stops.
+- Organic motion: `motion.hueDriftDeg` / `hueDriftPeriodS` (defaults
+  `10` / `12`) add a slow bounded hue oscillation on top of the ring
+  rotation; opt-in `motion.highlight { arcDeg, periodS, min }` sweeps a
+  raised-cosine bloom highlight around the perimeter.
+- `engine.updateOptions(partial)` — live option tuning (geometry realloc,
+  palette/LUT rebuild, motion/input scalars) with creation-equivalent
+  validation; `seed` is ignored after creation. The React `options` prop is
+  now **reactive** (section-wise diff applied via `updateOptions`).
+- React adapter now stops the animation loop while the document is hidden
+  (`visibilitychange`), composing with `active` and
+  `prefers-reduced-motion`.
+- Demo rebuilt as a product landing page: EN/日本語 language toggle and
+  light/dark theme toggle in the header, live playground sliders, an
+  auto-generated copyable `<EdgeAura …/>` snippet reflecting the current
+  controls, and installation/usage sections.
+
+### Changed
+
+- **Breaking:** the default palette `siri` is renamed **`opal`** and its
+  stops are redesigned (non-uniform mesh with a warm knot and a long cool
+  exhale, replacing the uniform rainbow). The previous rainbow stops remain
+  available as **`spectrum`**. `NORMALIZE_REF` / `NORMALIZE_REF_DARK` are
+  recomputed for the new default.
+- **Breaking (visual):** viewport corners now round off — the glow ends with
+  a 1.5 px feather ~`inset` px beyond the centerline arc instead of
+  flat-filling the square corner with peak alpha. Straight edges are
+  byte-identical.
+- Package description and keywords no longer reference third-party
+  assistant brands.
+
+### Fixed
+
+- Corner bloom continuity: eliminated the 45° brightness seam along the
+  corner ownership diagonals (up to 40/255) and the larger noise-wrap seam
+  at one corner-tile boundary (62/255) by evaluating corner-zone bloom
+  profiles from a shared per-corner snapshot with a smoothstep crossfade.
+  Mid-edge pixels are unchanged.
+
 ## [0.2.0] - 2026-07-08
 
 ### Added
@@ -89,6 +142,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.1.0] - 2026-07-07
 
-Initial release — Siri-style organic screen-edge glow: zero-dependency
+Initial release — organic screen-edge glow: zero-dependency
 Canvas 2D engine (spring physics, palette LUT with perceptual
 normalization) plus a thin React adapter.
