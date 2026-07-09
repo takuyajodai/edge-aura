@@ -18,6 +18,7 @@ installStubDom();
 
 import {
   createAuraEngine,
+  EDGE_AURA_DEFAULTS,
   EDGE_AURA_PALETTES,
   EDGE_AURA_PRESETS,
   NORMALIZE_REF,
@@ -27,6 +28,30 @@ import {
 } from "../src/index";
 
 const mk = (options?: EdgeAuraOptions) => createAuraEngine(newCanvas(), options);
+
+// Geometry constants the corner tests reason about (defaults; the engine
+// derives the same RIM = INSET + CR from these). CQ (corner-buffer size) = RIM.
+const INSET = EDGE_AURA_DEFAULTS.geometry.inset;
+const CR = EDGE_AURA_DEFAULTS.geometry.cornerRadius;
+const RIM = INSET + CR;
+
+/** Alpha byte at flat pixel index `i` (RGBA) of a tile buffer. */
+const alphaAt = (buf: Uint8ClampedArray, i: number): number => buf[i * 4 + 3];
+
+// captureBuffers draw order is fixed: 4 strips then 4 corners —
+// [top, bottom, left, right, TL, TR, BR, BL].
+const TILE = { top: 0, bottom: 1, left: 2, right: 3, TL: 4, TR: 5, BR: 6, BL: 7 } as const;
+
+// Local arc-center (bufferX, bufferY) of each corner tile, in the same
+// clockwise TL/TR/BR/BL order captureBuffers emits them. A corner pixel's
+// radial distance to this point is CR at the centerline; the outward feather
+// rounds the glow off past CR + INSET + CORNER_FEATHER_PX.
+const CORNER_CENTERS: Record<number, [number, number]> = {
+  [TILE.TL]: [RIM, RIM],
+  [TILE.TR]: [0, RIM],
+  [TILE.BR]: [0, 0],
+  [TILE.BL]: [RIM, 0],
+};
 
 describe("seed determinism", () => {
   it("renders identical bytes for two engines with the same seed", () => {
@@ -215,7 +240,7 @@ describe("background normalization", () => {
     expect(dark.effRingAlpha).not.toBe(light.effRingAlpha);
   });
 
-  it("keeps the stock siri palette at scale exactly 1 on both backgrounds", () => {
+  it("keeps the stock opal palette at scale exactly 1 on both backgrounds", () => {
     const light = mk().getNormalization();
     const dark = mk({ palette: { background: "dark" } }).getNormalization();
     expect(light.weight).toBe(NORMALIZE_REF);
@@ -270,13 +295,25 @@ describe("pixel snapshot", () => {
    * options after the fixed sequence below (30 frames of step(16.7) + render,
    * tap at frame 10, key(0.5) at frame 15, 800×600 stub viewport).
    *
+   * Regenerated for v0.3: the default palette is now `opal` (was `siri`), the
+   * corner tiles round off with the outward feather (was flat-filled to the
+   * square viewport corner), and the default `hueDriftDeg` (10°) hue
+   * oscillation shifts the palette sample every frame. All three fold into
+   * this one hash.
+   *
+   * Regenerated again for the corner-continuity seam fix: strip columns near
+   * the corners and the corner tiles now converge to a shared per-corner
+   * arc-midpoint noise profile (mid-edge columns stay byte-identical),
+   * removing the bloom-amplitude step along the 45° corner-ownership
+   * diagonals and at the TL tile boundary (the s = 0 noise wrap).
+   *
    * To regenerate after an INTENTIONAL default-appearance change: run this
    * test, copy the "received" hash from the failure output, and update the
-   * constant (or temporarily `console.log(hash)` below). Any unintentional
-   * mismatch is a pixel regression in the default rendering path.
+   * constant. Any unintentional mismatch is a pixel regression in the default
+   * rendering path.
    */
   const SNAPSHOT_SHA256 =
-    "4ba17f92239a04a0bc9c35795ee8669adc9a15e5cc7aaff89e2c672e112fd0ee";
+    "3b936d13bed5621a812df7e87af1ab658e917ef9b6907c017b23b2b3ebe48ab3";
 
   it("matches the golden hash for the fixed 30-frame sequence", () => {
     const engine = mk({ seed: 42 });
@@ -289,5 +326,330 @@ describe("pixel snapshot", () => {
     }
     expect(final.some((v) => v !== 0)).toBe(true);
     expect(sha256Hex(final)).toBe(SNAPSHOT_SHA256);
+  });
+});
+
+describe("dark pixel snapshot", () => {
+  /**
+   * Dark-background golden: same fixed 30-frame sequence as the light snapshot
+   * but with `{ seed: 42, palette: { background: "dark" } }`, so it locks the
+   * whole dark pipeline (darkAlphaGamma response curve, darkChroma Oklab lift,
+   * the raised dark ring-alpha floor, dark coreWhiten default) into one hash.
+   * Regenerate exactly like the light snapshot: run, copy the received hash.
+   * (Regenerated with the light snapshot for the corner-continuity seam fix —
+   * the defect this fix removes was dark-visible: darkAlphaGamma amplified
+   * the bloom step across the corner diagonals.)
+   */
+  const DARK_SNAPSHOT_SHA256 =
+    "3e1a46f751c3918d930ad972e97da49a0ac9079042e65cc3004d011d920e1c0c";
+
+  it("matches the golden hash for the fixed dark 30-frame sequence", () => {
+    const engine = mk({ seed: 42, palette: { background: "dark" } });
+    let final: Uint8ClampedArray = new Uint8ClampedArray(0);
+    for (let frame = 0; frame < 30; frame++) {
+      engine.step(16.7);
+      if (frame === 10) engine.tap({ x: 200, y: 300 });
+      if (frame === 15) engine.key(0.5);
+      final = captureFrame(engine);
+    }
+    expect(final.some((v) => v !== 0)).toBe(true);
+    expect(sha256Hex(final)).toBe(DARK_SNAPSHOT_SHA256);
+  });
+});
+
+describe("corner rounding", () => {
+  // The four corner tiles are the last four buffers captureBuffers records.
+  const cornerTiles = (engine: ReturnType<typeof mk>) =>
+    captureBuffers(engine).slice(4);
+
+  it("writes nothing beyond the outward feather (radialDist > CR + INSET + 2)", () => {
+    const engine = mk({ seed: 42 });
+    engine.step(16);
+    const corners = captureBuffers(engine);
+    for (const idx of [TILE.TL, TILE.TR, TILE.BR, TILE.BL]) {
+      const buf = corners[idx];
+      const [cx, cy] = CORNER_CENTERS[idx];
+      for (let ly = 0; ly < RIM; ly++) {
+        for (let lx = 0; lx < RIM; lx++) {
+          const radialDist = Math.hypot(lx + 0.5 - cx, ly + 0.5 - cy);
+          if (radialDist > CR + INSET + 2) {
+            // Past the 1.5px feather (+0.5px pixel-center margin): fully rounded
+            // off, so the square viewport-corner region must be transparent.
+            expect(alphaAt(buf, ly * RIM + lx)).toBe(0);
+          }
+        }
+      }
+    }
+  });
+
+  it("feathers monotonically to zero along the TL corner diagonal", () => {
+    // The TL arc center sits at the buffer's bottom-right (RIM, RIM); walking
+    // the diagonal outward toward the screen corner (k = RIM-1 → 0) increases
+    // radial distance at a fixed arc fraction, so np is constant and only the
+    // outward feather varies — alpha must be non-increasing and reach 0.
+    const engine = mk({ seed: 42 });
+    engine.step(16);
+    const tl = cornerTiles(engine)[0]; // TILE.TL is the first corner
+    // Sample the outward half of the diagonal (k = 0..5): k=5 sits just past
+    // the arc (still fully lit), k=0 is the screen corner (fully faded).
+    const alphas: number[] = [];
+    for (let k = 5; k >= 0; k--) alphas.push(alphaAt(tl, k * RIM + k));
+    expect(alphas[0]).toBeGreaterThan(0); // lit just outside the arc
+    for (let i = 1; i < alphas.length; i++) {
+      expect(alphas[i]).toBeLessThanOrEqual(alphas[i - 1]); // non-increasing
+    }
+    expect(alphas[alphas.length - 1]).toBe(0); // transparent at the corner tip
+  });
+
+  it("keeps every corner pixel NaN-free and never over-opaque", () => {
+    const engine = mk({ seed: 42, palette: { background: "dark" } });
+    engine.step(16);
+    for (const buf of cornerTiles(engine)) {
+      expect(buf.every((v) => Number.isFinite(v))).toBe(true);
+      expect(buf.every((v) => v <= 255)).toBe(true);
+    }
+  });
+});
+
+describe("palette determinism (stops, not name)", () => {
+  it("'spectrum' by name renders byte-identically to the same stops passed inline", () => {
+    // Proves the engine keys rendering off the stop values, not the preset
+    // name: a manually-supplied array equal to spectrum must be byte-equal.
+    // hueDriftDeg 0 + highlight off keeps the frame purely stops-driven.
+    const inlineSpectrum: EdgeAuraPaletteStops = [
+      [0, [33, 212, 154]],
+      [0.12, [20, 212, 196]],
+      [0.26, [56, 170, 255]],
+      [0.4, [139, 92, 246]],
+      [0.52, [236, 72, 153]],
+      [0.63, [249, 115, 22]],
+      [0.73, [251, 191, 36]],
+      [0.85, [74, 222, 128]],
+      [1.0, [33, 212, 154]],
+    ];
+    const byName = mk({
+      seed: 1,
+      palette: { stops: EDGE_AURA_PALETTES.spectrum },
+      motion: { hueDriftDeg: 0 },
+    });
+    const byStops = mk({
+      seed: 1,
+      palette: { stops: inlineSpectrum },
+      motion: { hueDriftDeg: 0 },
+    });
+    byName.step(16);
+    byStops.step(16);
+    const a = captureFrame(byName);
+    expect(a.some((v) => v !== 0)).toBe(true);
+    expect(bytesEqual(a, captureFrame(byStops))).toBe(true);
+  });
+});
+
+describe("hue drift", () => {
+  it("drift 10° diverges from drift 0 once elapsed advances", () => {
+    const mkDrift = (deg: number) =>
+      mk({ seed: 3, motion: { hueDriftDeg: deg } });
+    const still = mkDrift(0);
+    const drifting = mkDrift(10);
+    // Accumulate ~1s so sin(2π·elapsed/12) is well off zero — a sub-frame
+    // elapsed would leave the LUT sample offset below one entry and round away.
+    for (let i = 0; i < 60; i++) {
+      still.step(16.7);
+      drifting.step(16.7);
+    }
+    expect(bytesEqual(captureFrame(still), captureFrame(drifting))).toBe(false);
+  });
+
+  it("with drift 0 the period is irrelevant (offset is always exactly 0)", () => {
+    const mkPeriod = (period: number) =>
+      mk({ seed: 3, motion: { hueDriftDeg: 0, hueDriftPeriodS: period } });
+    const p12 = mkPeriod(12);
+    const p3 = mkPeriod(3);
+    for (let i = 0; i < 60; i++) {
+      p12.step(16.7);
+      p3.step(16.7);
+    }
+    expect(bytesEqual(captureFrame(p12), captureFrame(p3))).toBe(true);
+  });
+});
+
+describe("highlight sweep", () => {
+  it("absent option is byte-identical to the baseline (zero cost, zero change)", () => {
+    const baseline = mk({ seed: 5 });
+    const noHighlight = mk({ seed: 5, motion: {} });
+    expect(bytesEqual(captureFrame(baseline), captureFrame(noHighlight))).toBe(true);
+  });
+
+  it("enabled: swells the bloom but leaves the core-saturated peak untouched", () => {
+    // At elapsed 0 the crest is centered at arc s=0 (top), so the bottom strip
+    // is at the window trough: highlight scales the BLOOM there by `min`
+    // (0.35), lowering the deep bloom tail — while the centerline saturates
+    // core+bloom to 1 and clamps to the same peak alpha with or without it.
+    const off = mk({ seed: 5 });
+    const on = mk({
+      seed: 5,
+      motion: { highlight: { arcDeg: 80, periodS: 6, min: 0.35 } },
+    });
+    const bottomOff = captureBuffers(off)[TILE.bottom];
+    const bottomOn = captureBuffers(on)[TILE.bottom];
+
+    let maxOff = 0;
+    let maxOn = 0;
+    let sumOff = 0;
+    let sumOn = 0;
+    for (let i = 0; i < bottomOff.length / 4; i++) {
+      const ao = bottomOff[i * 4 + 3];
+      const an = bottomOn[i * 4 + 3];
+      if (ao > maxOff) maxOff = ao;
+      if (an > maxOn) maxOn = an;
+      sumOff += ao;
+      sumOn += an;
+    }
+    // The clamped-to-1 centerline peak is identical (core term unchanged)...
+    expect(maxOn).toBe(maxOff);
+    expect(maxOff).toBeGreaterThan(0);
+    // ...but the trough bloom is measurably dimmer, so the strips differ.
+    expect(sumOn).toBeLessThan(sumOff);
+    expect(bytesEqual(bottomOff, bottomOn)).toBe(false);
+  });
+});
+
+describe("dark alpha response (I3)", () => {
+  it("remaps a mid-bloom pixel's coverage by pow(aGeom, 0.55) within quantization", () => {
+    // Isolate the gamma curve: normalize off pins BOTH backgrounds to ring
+    // alpha 0.9 (identical frameIntensity), and aGeom is background-independent,
+    // so at a shared pixel  light_a = aGeom·0.9  and  dark_a = pow(aGeom,0.55)·0.9.
+    const FI = 0.9;
+    const light = mk({ seed: 7, palette: { normalize: false } });
+    const dark = mk({ seed: 7, palette: { normalize: false, background: "dark" } });
+    const lightTop = captureBuffers(light)[TILE.top];
+    const darkTop = captureBuffers(dark)[TILE.top];
+
+    let checked = 0;
+    for (let i = 0; i < lightTop.length / 4 && checked < 40; i++) {
+      const L = lightTop[i * 4 + 3];
+      if (L < 60 || L > 180) continue; // mid-bloom band only
+      const D = darkTop[i * 4 + 3];
+      const aGeom = L / (FI * 255);
+      const predicted = Math.round(Math.pow(aGeom, 0.55) * FI * 255);
+      // ±2: L-recovery rounding + the dark path's floor-index + D's own round.
+      expect(Math.abs(D - predicted)).toBeLessThanOrEqual(2);
+      checked++;
+    }
+    expect(checked).toBeGreaterThan(0); // the mid-bloom band was actually sampled
+  });
+});
+
+describe("updateOptions", () => {
+  it("geometry band change reallocates buffers to a deeper strip", () => {
+    const engine = mk({ seed: 8 });
+    const beforeTop = captureBuffers(engine)[TILE.top];
+    engine.updateOptions({ geometry: { band: 120 } });
+    const afterTop = captureBuffers(engine)[TILE.top];
+    // A taller band means a taller top strip → strictly more bytes.
+    expect(afterTop.length).toBeGreaterThan(beforeTop.length);
+  });
+
+  it("palette scalar change rebuilds the LUT (frame bytes change, size unchanged)", () => {
+    const engine = mk({ seed: 8 });
+    const before = captureFrame(engine);
+    const effPastelBefore = engine.getNormalization().effPastel;
+    engine.updateOptions({ palette: { pastel: 0.9 } });
+    const after = captureFrame(engine);
+    expect(before.length).toBe(after.length); // geometry untouched
+    expect(bytesEqual(before, after)).toBe(false);
+    // getNormalization reflects the re-derive: the effective pastel moved off
+    // its default (normalize's step-down settles it below the requested 0.9).
+    expect(engine.getNormalization().effPastel).not.toBe(effPastelBefore);
+  });
+
+  it("motion change applies (a slower rotation diverges from the default)", () => {
+    const control = mk({ seed: 8 });
+    const tuned = mk({ seed: 8 });
+    tuned.updateOptions({ motion: { rotateIdleS: 2 } });
+    for (let i = 0; i < 30; i++) {
+      control.step(16.7);
+      tuned.step(16.7);
+    }
+    expect(bytesEqual(captureFrame(control), captureFrame(tuned))).toBe(false);
+  });
+
+  it("validates incoming stops exactly like creation (structural garbage throws)", () => {
+    const engine = mk({ seed: 8 });
+    expect(() =>
+      engine.updateOptions({
+        palette: { stops: [[0, [1, 2, 3]]] as unknown as EdgeAuraPaletteStops },
+      }),
+    ).toThrowError(/^edge-aura:/);
+  });
+
+  it("ignores `seed` after creation (phases are fixed for the instance's life)", () => {
+    const engine = mk({ seed: 42 });
+    const before = captureFrame(engine);
+    engine.updateOptions({ seed: 43 } as EdgeAuraOptions);
+    expect(bytesEqual(before, captureFrame(engine))).toBe(true);
+  });
+
+  it("is a no-op after destroy()", () => {
+    const engine = mk({ seed: 8 });
+    engine.destroy();
+    expect(() => engine.updateOptions({ palette: { pastel: 0.5 } })).not.toThrow();
+    expect(captureBuffers(engine)).toHaveLength(0); // still draws nothing
+  });
+
+  it("commits an in-flight crossfade to its target before applying", () => {
+    // Start a long crossfade toward nebula, step into the middle of it, then
+    // updateOptions — the fade is cancelled and jumped to the nebula target, so
+    // the frame equals a fresh nebula-stops instance stepped to the same elapsed.
+    const engine = mk({ seed: 7 });
+    engine.step(16);
+    engine.setPalette("nebula", { crossfadeMs: 1000 });
+    engine.step(16); // mid-fade
+    engine.updateOptions({}); // empty partial still commits the fade
+    const committed = captureFrame(engine);
+
+    const direct = mk({ seed: 7, palette: { stops: EDGE_AURA_PALETTES.nebula } });
+    direct.step(16);
+    direct.step(16);
+    expect(bytesEqual(committed, captureFrame(direct))).toBe(true);
+  });
+
+  it("keeps a setPalette-selected palette across a palette-section update (no revert to creation stops)", () => {
+    // Regression: setPalette must record its stops into the resolved config, so
+    // a later updateOptions({ palette }) rebuilds the LUT from the palette on
+    // screen — not the creation-time stops. `background: "light"` is the default
+    // (a scalar no-op) so it isolates the rebuild path.
+    const engine = mk({ seed: 7 });
+    engine.setPalette("ocean");
+    const oceanFrame = captureFrame(engine);
+    const oceanWeight = engine.getNormalization().weight;
+
+    engine.updateOptions({ palette: { background: "light" } });
+
+    // Weight and pixels stay on ocean — a fresh ocean instance is the reference.
+    const oceanRef = mk({ seed: 7, palette: { stops: EDGE_AURA_PALETTES.ocean } });
+    expect(engine.getNormalization().weight).toBeCloseTo(oceanWeight, 12);
+    expect(engine.getNormalization().weight).toBeCloseTo(
+      oceanRef.getNormalization().weight,
+      12,
+    );
+    expect(bytesEqual(captureFrame(engine), oceanFrame)).toBe(true);
+    // And crucially it did NOT snap back to the creation (opal) default.
+    expect(bytesEqual(captureFrame(engine), captureFrame(mk({ seed: 7 })))).toBe(false);
+  });
+
+  it("commits an in-flight crossfade to its target even when the same partial rebuilds the LUT", () => {
+    // The fade-commit's `paletteLut = fadeToLut` must survive the subsequent
+    // applyPalette() — which only holds if setPalette wrote its stops back into
+    // the resolved config. A non-empty palette partial exercises applyPalette.
+    const engine = mk({ seed: 7 });
+    engine.setPalette("nebula", { crossfadeMs: 1000 });
+    engine.step(16); // mid-fade
+    engine.updateOptions({ palette: { background: "light" } });
+    const committed = captureFrame(engine);
+
+    const direct = mk({ seed: 7, palette: { stops: EDGE_AURA_PALETTES.nebula } });
+    direct.step(16);
+    expect(bytesEqual(committed, captureFrame(direct))).toBe(true);
   });
 });

@@ -21,8 +21,24 @@ export type EdgeAuraPaletteStops = EdgeAuraPaletteStop[];
 export type PaletteStops = EdgeAuraPaletteStops;
 
 export const EDGE_AURA_PALETTES = {
-  /** Stock Siri-style mesh gradient — the engine's default. */
-  siri: [
+  /**
+   * Organic mesh gradient — the engine's default. Non-uniform stop spacing
+   * and a non-monotonic hue path (a warm knot around the midpoint dissolving
+   * into a long cool exhale) so the ring reads as a hand-tuned mesh rather
+   * than an evenly-stepped hue wheel.
+   */
+  opal: [
+    [0,    [78,  104, 224]],
+    [0.15, [66,  186, 200]],
+    [0.30, [138, 120, 232]],
+    [0.44, [232, 96,  168]],
+    [0.50, [242, 116, 90 ]],
+    [0.58, [230, 168, 74 ]],
+    [0.86, [86,  196, 150]],
+    [1.0,  [78,  104, 224]],
+  ],
+  /** Full-spectrum rainbow cycle — the loudest option. */
+  spectrum: [
     [0,    [33,  212, 154]],
     [0.12, [20,  212, 196]],
     [0.26, [56,  170, 255]],

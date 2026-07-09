@@ -23,6 +23,7 @@ const { mockEngine, createAuraEngine } = vi.hoisted(() => {
     kindle: vi.fn(),
     setTyping: vi.fn(),
     setPalette: vi.fn(),
+    updateOptions: vi.fn(),
     getNormalization: vi.fn(() => ({ weight: 0, effRingAlpha: 0.9, effPastel: 0.35 })),
     resize: vi.fn(),
     destroy: vi.fn(),
@@ -45,12 +46,31 @@ import { EdgeAura } from "../src/react";
 const pendingRaf = new Set<number>();
 let nextRafId = 1;
 let prmMatches = false;
+// jsdom exposes `document.hidden` / `visibilityState` as prototype getters; we
+// override them with a module-var-backed getter so tests can flip tab
+// visibility and dispatch the matching event. shouldRun() reads document.hidden.
+let docHidden = false;
+
+/** Flip tab visibility and fire the event the adapter listens for. */
+function setVisibility(hidden: boolean): void {
+  docHidden = hidden;
+  document.dispatchEvent(new Event("visibilitychange"));
+}
 
 beforeEach(() => {
   vi.clearAllMocks();
   pendingRaf.clear();
   nextRafId = 1;
   prmMatches = false;
+  docHidden = false;
+  Object.defineProperty(document, "hidden", {
+    configurable: true,
+    get: () => docHidden,
+  });
+  Object.defineProperty(document, "visibilityState", {
+    configurable: true,
+    get: () => (docHidden ? "hidden" : "visible"),
+  });
 
   globalThis.requestAnimationFrame = ((_cb: FrameRequestCallback) => {
     const id = nextRafId++;
@@ -214,5 +234,96 @@ describe("palette prop", () => {
       expect.any(Error),
     );
     warnSpy.mockRestore();
+  });
+});
+
+describe("reactive options", () => {
+  it("calls updateOptions with the diffed section on an options change", () => {
+    const { rerender } = render(<EdgeAura options={{ motion: { rotateIdleS: 8 } }} />);
+    // Mount applied these options to createAuraEngine — no live update yet.
+    expect(mockEngine.updateOptions).not.toHaveBeenCalled();
+
+    rerender(<EdgeAura options={{ motion: { rotateIdleS: 2 } }} />);
+    expect(mockEngine.updateOptions).toHaveBeenCalledTimes(1);
+    expect(mockEngine.updateOptions).toHaveBeenCalledWith({ motion: { rotateIdleS: 2 } });
+  });
+
+  it("does not call updateOptions for a value-equal options object", () => {
+    const { rerender } = render(<EdgeAura options={{ input: { tapEnergy: 0.8 } }} />);
+    // New object, identical contents — the JSON compare short-circuits.
+    rerender(<EdgeAura options={{ input: { tapEnergy: 0.8 } }} />);
+    expect(mockEngine.updateOptions).not.toHaveBeenCalled();
+  });
+
+  it("does NOT call updateOptions when only `seed` changes (seed is remount-only)", () => {
+    const { rerender } = render(<EdgeAura options={{ seed: 1 }} />);
+    rerender(<EdgeAura options={{ seed: 2 }} />);
+    expect(mockEngine.updateOptions).not.toHaveBeenCalled();
+    expect(createAuraEngine).toHaveBeenCalledTimes(1); // and no remount
+  });
+
+  it("repaints the static frame after updateOptions while the loop is stopped (reduced motion)", () => {
+    // A geometry partial clears the canvas but no rAF tick follows under PRM, so
+    // the adapter must repaint or the ring blanks permanently.
+    prmMatches = true;
+    const { rerender } = render(<EdgeAura options={{ geometry: { band: 100 } }} />);
+    expect(mockEngine.renderStatic).toHaveBeenCalledTimes(1); // mount frame
+
+    rerender(<EdgeAura options={{ geometry: { band: 120 } }} />);
+    expect(mockEngine.updateOptions).toHaveBeenCalledWith({ geometry: { band: 120 } });
+    expect(mockEngine.renderStatic).toHaveBeenCalledTimes(2); // repainted
+  });
+
+  it("does NOT repaint after updateOptions while the rAF loop is running", () => {
+    // The running loop paints every frame; an extra renderStatic would fight it.
+    const { rerender } = render(<EdgeAura options={{ geometry: { band: 100 } }} />);
+    const before = mockEngine.renderStatic.mock.calls.length;
+    rerender(<EdgeAura options={{ geometry: { band: 120 } }} />);
+    expect(mockEngine.updateOptions).toHaveBeenCalledTimes(1);
+    expect(mockEngine.renderStatic.mock.calls.length).toBe(before);
+  });
+});
+
+describe("visibility gating", () => {
+  it("stops the rAF loop while hidden and restarts it on return", () => {
+    render(<EdgeAura />);
+    expect(pendingRaf.size).toBe(1);
+
+    setVisibility(true);
+    expect(pendingRaf.size).toBe(0); // hidden tab burns no rAF budget
+
+    setVisibility(false);
+    expect(pendingRaf.size).toBe(1); // active + visible + no PRM → resumes
+    expect(mockEngine.destroy).not.toHaveBeenCalled(); // engine survived
+  });
+
+  it("becoming visible does NOT restart the loop when the effect is inactive", () => {
+    render(<EdgeAura active={false} />);
+    expect(pendingRaf.size).toBe(0);
+    setVisibility(true);
+    setVisibility(false);
+    expect(pendingRaf.size).toBe(0); // active=false gates the loop off
+  });
+
+  it("becoming visible does NOT restart the loop under prefers-reduced-motion", () => {
+    prmMatches = true;
+    render(<EdgeAura />);
+    expect(pendingRaf.size).toBe(0);
+    setVisibility(true);
+    setVisibility(false);
+    expect(pendingRaf.size).toBe(0); // PRM always wins
+  });
+
+  it("removes the visibilitychange listener on unmount", () => {
+    const removed: string[] = [];
+    const removeSpy = vi
+      .spyOn(document, "removeEventListener")
+      .mockImplementation((type) => {
+        removed.push(type as string);
+      });
+    const { unmount } = render(<EdgeAura />);
+    unmount();
+    expect(removed).toContain("visibilitychange");
+    removeSpy.mockRestore();
   });
 });

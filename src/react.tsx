@@ -21,7 +21,21 @@ export interface EdgeAuraProps {
    * pulse. A timestamp (e.g. `Date.now()`) is the natural choice.
    */
   savedAt?: number;
-  /** Engine tuning overrides (defaults reproduce the stock appearance). */
+  /**
+   * Engine tuning overrides (defaults reproduce the stock appearance).
+   * REACTIVE: on change the engine is live-tuned via `updateOptions`,
+   * diffed section-wise (geometry / palette / motion / input) — only the
+   * sections whose object changed are re-applied. Sections are compared by
+   * reference first (pass a memoized/stable object to skip re-applies), then
+   * by a cheap JSON compare, so re-declaring a value-equal object every render
+   * is a no-op. Like the engine's `updateOptions`, this MERGES rather than
+   * replaces: removing a key or a whole section does NOT revert it to the
+   * default — set the value explicitly to change it back. While the `palette`
+   * prop is set it governs the ring's stops, so `options.palette.stops` is
+   * ignored (other palette scalars still apply). `options.seed` is read only
+   * at mount; changing it requires remounting the component (e.g. a changed
+   * React `key`).
+   */
   options?: EdgeAuraOptions;
   /**
    * Ring palette — a preset name (e.g. "ocean") or a raw stop array. REACTIVE:
@@ -78,6 +92,55 @@ function resolvePaletteStops(
   palette: EdgeAuraPaletteName | EdgeAuraPaletteStops,
 ): EdgeAuraPaletteStops {
   return typeof palette === "string" ? EDGE_AURA_PALETTES[palette] : palette;
+}
+
+// -- Reactive-options diffing ----------------------------------------------
+// The `options` prop is applied live via engine.updateOptions. Each section is
+// compared by reference first (the memoized-object fast path), then by a cheap
+// JSON compare (so a re-declared value-equal object is a no-op). Same-reference
+// (incl. both undefined) short-circuits before any JSON work.
+function sectionEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (a == null || b == null) return false;
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+/**
+ * Build the minimal updateOptions partial for an `options` prop change, or
+ * null when nothing actionable changed. Sections absent from `next` are
+ * skipped, not reverted: updateOptions key-merges and cannot express "reset to
+ * default", so a cleared section keeps its last value (documented on the prop).
+ * When `paletteStopsGoverned` (a `palette` prop currently owns the ring's
+ * stops), `palette.stops` is stripped so it can't clobber that prop — the other
+ * palette scalars still apply, since updateOptions merges within the section.
+ */
+function buildOptionsPartial(
+  prev: EdgeAuraOptions | undefined,
+  next: EdgeAuraOptions | undefined,
+  paletteStopsGoverned: boolean,
+): EdgeAuraOptions | null {
+  let partial: EdgeAuraOptions | null = null;
+  const add = <K extends keyof EdgeAuraOptions>(k: K, v: EdgeAuraOptions[K]) => {
+    (partial ??= {})[k] = v;
+  };
+
+  if (next?.geometry !== undefined && !sectionEqual(prev?.geometry, next.geometry))
+    add("geometry", next.geometry);
+  if (next?.motion !== undefined && !sectionEqual(prev?.motion, next.motion))
+    add("motion", next.motion);
+  if (next?.input !== undefined && !sectionEqual(prev?.input, next.input))
+    add("input", next.input);
+
+  if (next?.palette !== undefined && !sectionEqual(prev?.palette, next.palette)) {
+    if (paletteStopsGoverned && next.palette.stops !== undefined) {
+      const { stops: _stops, ...rest } = next.palette;
+      if (Object.keys(rest).length > 0) add("palette", rest);
+    } else {
+      add("palette", next.palette);
+    }
+  }
+
+  return partial;
 }
 
 const CANVAS_STYLE: CSSProperties = {
@@ -250,13 +313,20 @@ export function EdgeAura({
       cancelAnimationFrame(raf);
     };
 
-    // Single decision point for whether the loop should run: reduced motion
-    // always wins (static frame only), then the `active` prop gates the loop.
+    // Single predicate for whether the loop should run, composing every gate
+    // instead of scattering the booleans: the `active` prop must permit it,
+    // motion must be allowed (prefers-reduced-motion always wins → static frame
+    // only), and the document must be visible (a hidden/background tab burns no
+    // rAF budget). Every place that flips one of these routes through syncLoop.
+    const shouldRun = () =>
+      activeRef.current && !reducedMotion && !document.hidden;
+
+    // Single decision point: start when shouldRun(), otherwise stop.
     // start()/stop() are idempotent, so calling this redundantly (StrictMode
     // double-effects, prop toggles to the same value) is safe. Stopping
     // freezes the last frame — the canvas is intentionally NOT cleared.
     const syncLoop = () => {
-      if (activeRef.current && !reducedMotion) {
+      if (shouldRun()) {
         start();
       } else {
         stop();
@@ -293,14 +363,19 @@ export function EdgeAura({
     const onMotionChange = (ev: MediaQueryListEvent) => {
       reducedMotion = ev.matches;
       reducedMotionRef.current = reducedMotion;
-      if (reducedMotion) {
-        stop();
-        engine.renderStatic();
-      } else {
-        // Motion allowed again — resume only if `active` also permits it.
-        syncLoop();
-      }
+      // syncLoop() stops the loop when reduced motion is now on and resumes it
+      // (if active + visible) when it is off — shouldRun() folds in the new
+      // reducedMotion. Entering reduced motion also needs the calm static frame
+      // painted once, since no rAF tick will follow.
+      syncLoop();
+      if (reducedMotion) engine.renderStatic();
     };
+
+    // Pause the loop while the tab is hidden and resume it on return, but only
+    // if policy still allows (active + motion). Routed through syncLoop so the
+    // decision stays in one predicate. The frozen last frame is left on the
+    // canvas while hidden (stop() never clears), so returning needs no repaint.
+    const onVisibility = () => syncLoop();
 
     const tapEvent   = `${eventPrefix}:tap`;
     const keyEvent   = `${eventPrefix}:key`;
@@ -311,6 +386,7 @@ export function EdgeAura({
     window.addEventListener(savedEvent, onSavedPulse);
     window.addEventListener("resize", onResize);
     mq.addEventListener("change", onMotionChange);
+    document.addEventListener("visibilitychange", onVisibility);
 
     return () => {
       stop();
@@ -322,6 +398,7 @@ export function EdgeAura({
       window.removeEventListener(savedEvent, onSavedPulse);
       window.removeEventListener("resize", onResize);
       mq.removeEventListener("change", onMotionChange);
+      document.removeEventListener("visibilitychange", onVisibility);
       engine.destroy();
       engineRef.current = null;
       // Same inlined dev check as above — see the comment there. Only clear
@@ -346,6 +423,52 @@ export function EdgeAura({
   useEffect(() => {
     engineRef.current?.setTyping(state === "typing");
   }, [state]);
+
+  // Reactive options: live-tune the engine on `options` prop change. The ref
+  // holds the last-applied options; equality against it skips the initial
+  // render (the engine was created with these options) and StrictMode's double
+  // run. The ref is advanced even when we skip applying, so a later eventPrefix
+  // remount recreates the engine with the latest options. `paletteRef` is read
+  // (not depended on) to keep the `palette` prop's stops from being clobbered
+  // by options.palette.stops while it is set — even mid-transition, when this
+  // effect runs before the palette effect (declaration order), the current
+  // `palette` prop OR the still-old ref catches an in-force palette prop.
+  useEffect(() => {
+    const prev = optionsRef.current;
+    if (prev === options) return;
+    const partial = buildOptionsPartial(
+      prev,
+      options,
+      palette != null || paletteRef.current != null,
+    );
+    optionsRef.current = options;
+    const engine = engineRef.current;
+    if (!engine || !partial) return;
+    try {
+      engine.updateOptions(partial);
+      // A geometry partial reallocates the tile buffers and clears the canvas
+      // (per updateOptions' C5 contract), but no rAF tick follows when the loop
+      // is stopped — under reduced motion, while inactive, or on a hidden tab —
+      // so the ring would blank until the next transition. Repaint the static
+      // frame whenever the loop is not running, mirroring onMotionChange. This
+      // also reflects palette/motion/input changes made while paused.
+      const loopRunning =
+        activeRef.current && !reducedMotionRef.current && !document.hidden;
+      if (!loopRunning) engine.renderStatic();
+    } catch (err) {
+      // Decorative overlay: a runtime-invalid option keeps the current config
+      // instead of unmounting the host tree (an error thrown in a commit effect
+      // is uncaught by default). Mirrors the mount-time createAuraEngine and
+      // setPalette catches — same inlined dev check.
+      if (
+        typeof process !== "undefined" &&
+        !!process.env &&
+        process.env.NODE_ENV !== "production"
+      ) {
+        console.warn("edge-aura: updateOptions failed", err);
+      }
+    }
+  }, [options, palette]);
 
   // Reactive palette: crossfade the live engine to the new palette on prop
   // CHANGE only. The equality guard skips the initial render (the engine was
