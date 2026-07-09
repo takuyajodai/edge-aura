@@ -97,6 +97,14 @@ export interface EdgeAuraGeometryOptions {
    * Strip depth (px) — also the hard end of the inward dissolve.  The inner
    * tail is windowed smoothly to 0 exactly at this depth, so there is never
    * a visible cutoff line. Default 76.
+   *
+   * The bloom depth profile is SELF-SIMILAR in `band`: the whole bloom sigma
+   * family (the internal falloff constants and `innerSigmaMax` below) is
+   * calibrated at the default band 76 and scales PROPORTIONALLY with `band`,
+   * so shrinking the thickness shrinks the depth falloff and the organic
+   * inner-edge undulation with it — a thin ring reads as a scaled-down copy
+   * of the default, not a hard-cropped tail. (Core line thickness and the
+   * along-edge hotspot widths are absolute and do NOT scale with `band`.)
    */
   band?: number;
   /**
@@ -113,6 +121,13 @@ export interface EdgeAuraGeometryOptions {
    * by (base + var·noise), clamped to innerSigmaMax.  The rational tail
    * fades far more gradually than a Gaussian, so the inner face has no
    * perceptible end. Defaults 1.25 / 0.45 / 17.
+   *
+   * `innerSoftBase`/`innerSoftVar` are dimensionless multipliers on the
+   * (already band-scaled) outward sigma, so they are band-independent.
+   * `innerSigmaMax` is a px cap CALIBRATED AT THE DEFAULT BAND 76: it is part
+   * of the depth family, so the effective cap scales proportionally with
+   * `band` (a user value is scaled the same way), keeping the inner falloff
+   * self-similar as the thickness changes.
    */
   innerSoftBase?: number;
   innerSoftVar?: number;
@@ -809,6 +824,19 @@ export function createAuraEngine(
   let CORE_SIGMA_BASE = 0, CORE_SIGMA_VAR = 0;
   let INNER_SOFT_BASE = 0, INNER_SOFT_VAR = 0, INNER_SIGMA_MAX = 0;
 
+  // Bloom depth profile scales with band so the falloff stays SELF-SIMILAR:
+  // the sb sigma family (base, noise range, energy contributions, clamp bounds)
+  // and the innerSigmaMax cap are all calibrated at the DEFAULT band and then
+  // multiplied by BLOOM_SCALE = BAND / defaultBand. At the default band
+  // BLOOM_SCALE is exactly 1, so the whole sb pipeline — and every pixel on the
+  // default path — is byte-identical. Shrinking the band shrinks the bloom's
+  // depth falloff (and, via sbIn → reach(), its inward reach and undulation)
+  // in proportion, so a thin ring reads as a scaled-down version of the default
+  // rather than a hard-cropped tail. These are precomputed here (once per
+  // geometry derive) so the per-column hot path pays zero extra cost.
+  let SB_BASE = 0, SB_NOISE = 0, SB_KEY = 0, SB_HOT = 0, SB_BURST = 0;
+  let SB_CLAMP_LO = 0, SB_CLAMP_HI = 0, INNER_SIGMA_MAX_EFF = 0;
+
   const deriveGeometry = () => {
     INSET = clampOpt(geo.inset, 0, DEF_GEO.inset);
     CR = clampOpt(geo.cornerRadius, 0, DEF_GEO.cornerRadius);
@@ -823,6 +851,20 @@ export function createAuraEngine(
     INNER_SOFT_BASE = geo.innerSoftBase;
     INNER_SOFT_VAR = geo.innerSoftVar;
     INNER_SIGMA_MAX = clampOpt(geo.innerSigmaMax, 1, DEF_GEO.innerSigmaMax);
+
+    // Fold BLOOM_SCALE into every sb-pipeline constant (see the block comment
+    // above). Only the BLOOM DEPTH family scales: core sigma, the tangential
+    // hotspot sigmas, the Ab amplitudes, INSET and CORNER_FEATHER_PX are
+    // deliberately left absolute (widths/amplitudes, not depth).
+    const BLOOM_SCALE = BAND / DEF_GEO.band;
+    SB_BASE = 4.5 * BLOOM_SCALE;
+    SB_NOISE = 5.5 * BLOOM_SCALE;
+    SB_KEY = 9 * BLOOM_SCALE;
+    SB_HOT = 7 * BLOOM_SCALE;
+    SB_BURST = 2 * BLOOM_SCALE;
+    SB_CLAMP_LO = 4 * BLOOM_SCALE;
+    SB_CLAMP_HI = 16 * BLOOM_SCALE;
+    INNER_SIGMA_MAX_EFF = INNER_SIGMA_MAX * BLOOM_SCALE;
   };
 
   let KEY_SIGMA = 0, TAP_SIGMA = 0;
@@ -1352,19 +1394,24 @@ export function createAuraEngine(
         dCirc < highlightHalf ? 0.5 * (1 + Math.cos((Math.PI * dCirc) / highlightHalf)) : 0;
       np.Ab *= HIGHLIGHT_MIN + (1 - HIGHLIGHT_MIN) * w;
     }
+    // sb constants (base / noise / energy / clamp bounds) are pre-scaled by
+    // BLOOM_SCALE in deriveGeometry, so the bloom depth falloff shrinks with the
+    // band and the profile stays self-similar (default band → identity).
     const sb = clamp(
-      4.5 + 5.5 * noise(t * 0.6, s * 0.015 + phase[0]) +
-        9 * keySum +
-        7 * sHot.x * hotG +
-        2 * burst,
-      4, 16,
+      SB_BASE + SB_NOISE * noise(t * 0.6, s * 0.015 + phase[0]) +
+        SB_KEY * keySum +
+        SB_HOT * sHot.x * hotG +
+        SB_BURST * burst,
+      SB_CLAMP_LO, SB_CLAMP_HI,
     );
     np.bloomDenOut = 2 * sb * sb;
 
     // Inward tail: wider and slowly breathing, so the inner face dissolves
-    // softly instead of mirroring the tight outer cutoff.
+    // softly instead of mirroring the tight outer cutoff. The cap is the
+    // band-scaled innerSigmaMax (INNER_SIGMA_MAX_EFF), so the inward reach
+    // scales with the band too.
     const sbIn = Math.min(
-      INNER_SIGMA_MAX,
+      INNER_SIGMA_MAX_EFF,
       sb * (INNER_SOFT_BASE + INNER_SOFT_VAR * noise(t * 0.45, s * 0.012 + phase[4])),
     );
     np.sbIn = sbIn;

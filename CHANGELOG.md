@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.2] - 2026-07-10
+
+### Fixed
+
+- Small `band` values looked hard-cropped: the bloom's depth-falloff sigmas
+  were absolute pixels, so a thin band amputated a still-strong tail and the
+  inner-edge undulation stayed absolute (relatively flat). The depth profile
+  is now self-similar in `band` — the sigma family (base, noise range,
+  energy swells, clamp bounds, `innerSigmaMax`) scales by `band / 76` — so a
+  thin ring keeps the same organic dissolve, proportionally. `band: 76`
+  (default) is byte-identical (both golden snapshots unchanged). The `thin`
+  preset drops its manual `innerSigmaMax` override, which hand-approximated
+  exactly this scaling and would now double-shrink.
+
 ## [0.3.1] - 2026-07-10
 
 ### Fixed

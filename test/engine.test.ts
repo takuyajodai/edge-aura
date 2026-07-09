@@ -574,7 +574,9 @@ describe("corner-continuity seam (v0.3.1 depth crossfade)", () => {
     return engine;
   };
 
-  it.each([76, 120])(
+  // band 34 added with the bloom-scale fix: the scaled sbIn drives the corner
+  // reach / diagonal-cut clip, so the seam must stay nulled at small band too.
+  it.each([34, 76, 120])(
     "nulls the diagonal seam at all four corners (band %i, dark) ≤ 2/255",
     (band) => {
       const bufs = captureBuffers(settle(band));
@@ -583,7 +585,7 @@ describe("corner-continuity seam (v0.3.1 depth crossfade)", () => {
     },
   );
 
-  it.each([76, 120])(
+  it.each([34, 76, 120])(
     "keeps the TL corner-tile boundary step ≤ 3/255 (band %i, dark)",
     (band) => {
       const bufs = captureBuffers(settle(band));
@@ -592,7 +594,7 @@ describe("corner-continuity seam (v0.3.1 depth crossfade)", () => {
     },
   );
 
-  it.each([76, 120])(
+  it.each([34, 76, 120])(
     "keeps live per-column noise at shallow depths outside the tile-adjacent span (band %i)",
     (band) => {
       const bufs = captureBuffers(settle(band));
@@ -843,5 +845,73 @@ describe("updateOptions", () => {
     const direct = mk({ seed: 7, palette: { stops: EDGE_AURA_PALETTES.nebula } });
     direct.step(16);
     expect(bytesEqual(committed, captureFrame(direct))).toBe(true);
+  });
+});
+
+describe("band self-similarity (bloom depth scale)", () => {
+  // The stub viewport is 800×600; the top strip is (W − 2·RIM) wide × BAND tall,
+  // row-major, with depth increasing down the rows (see compositeAlpha above).
+  const VW = 800;
+  const TOP_W = VW - 2 * RIM;
+  const MID = Math.floor(TOP_W / 2); // a mid-edge column, far from either corner
+
+  const settleTop = (band: number): Uint8ClampedArray => {
+    const engine = mk({ seed: 42, geometry: { band } });
+    for (let f = 0; f < 8; f++) engine.step(16.7);
+    return captureBuffers(engine)[TILE.top];
+  };
+  // Alpha byte of the mid column at absolute depth d (row d) of the top strip.
+  const midAlphaAt = (top: Uint8ClampedArray, d: number): number =>
+    top[(d * TOP_W + MID) * 4 + 3];
+
+  it("(a) matches the mid-column alpha profile at relative depths across bands", () => {
+    // The bloom depth falloff is self-similar in `band`, so sampling the SAME
+    // relative depths (d/band) on a small band (38) and the default (76) yields
+    // the same alpha profile. Tolerance 10/255: the shallowest sample (0.2)
+    // carries the largest deviation because the core Gaussian — deliberately
+    // NOT band-scaled — still contributes at that shallow absolute depth; the
+    // deeper (bloom-dominated) samples match within ~1. Pre-fix the band-38
+    // profile was ~{0.2:77, 0.4:34, 0.6:12, 0.8:4} vs band-76 {35,7,2,0} —
+    // grossly fatter, i.e. NOT self-similar.
+    const small = settleTop(38);
+    const def = settleTop(76);
+    for (const r of [0.2, 0.4, 0.6, 0.8]) {
+      const aSmall = midAlphaAt(small, Math.round(r * 38));
+      const aDef = midAlphaAt(def, Math.round(r * 76));
+      expect(Math.abs(aSmall - aDef)).toBeLessThanOrEqual(10);
+    }
+  });
+
+  it("(b) does not hard-crop the inner tail at band 34", () => {
+    // Just inside the quartic window end (depth = band − 3 = 31): if the bloom
+    // sigma stayed absolute, the still-strong tail would be amputated here,
+    // leaving a visible residual (pre-fix worst-case across columns = 5/255).
+    // Scaled sigma makes the tail already negligible by this depth, comparable
+    // to the default band's residual at its own band − 3 (depth 73 → 0/255).
+    const D = 34 - 3;
+    const top34 = settleTop(34);
+    let maxResidual = 0;
+    for (let i = 0; i < TOP_W; i++) {
+      const a = top34[(D * TOP_W + i) * 4 + 3];
+      if (a > maxResidual) maxResidual = a;
+    }
+    // Default-band reference residual at its own band − 3.
+    const top76 = settleTop(76);
+    let defResidual = 0;
+    for (let i = 0; i < TOP_W; i++) {
+      const a = top76[((76 - 3) * TOP_W + i) * 4 + 3];
+      if (a > defResidual) defResidual = a;
+    }
+    expect(maxResidual).toBeLessThanOrEqual(defResidual + 2); // comparable to default
+    expect(maxResidual).toBeLessThan(5); // MUCH smaller than the pre-fix value (5)
+  });
+
+  it("(c) the thin preset validates and renders non-zero, NaN-free pixels", () => {
+    const engine = mk({ ...EDGE_AURA_PRESETS.thin, seed: 1 });
+    engine.step(16.7);
+    const frame = captureFrame(engine);
+    expect(frame.some((v) => v !== 0)).toBe(true);
+    expect(frame.every((v) => Number.isFinite(v))).toBe(true);
+    expect(frame.every((v) => v <= 255)).toBe(true);
   });
 });
