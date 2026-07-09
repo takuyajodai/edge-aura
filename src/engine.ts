@@ -133,7 +133,7 @@ export interface EdgeAuraPaletteOptions {
   pastel?: number;
   /**
    * Neon touch: how strongly the core line is whitened toward 255. The
-   * default is background-dependent — 0.2 on a "light" page, 0.32 on a "dark"
+   * default is background-dependent — 0.2 on a "light" page, 0.35 on a "dark"
    * one (a hotter core reads better against black). An explicit value always
    * wins over both defaults.
    */
@@ -190,7 +190,7 @@ export interface EdgeAuraPaletteOptions {
    * DARK BACKGROUNDS ONLY (ignored when `background` is "light"). Oklab
    * chroma multiplier applied to every LUT entry at build time (L preserved,
    * a/b scaled): compensates for colour reading less saturated against black.
-   * 1.0 disables the lift. Default 1.15. Applied AFTER perceptual-weight
+   * 1.0 disables the lift. Default 1.25. Applied AFTER perceptual-weight
    * measurement, so it never perturbs normalization.
    */
   darkChroma?: number;
@@ -345,7 +345,7 @@ export const EDGE_AURA_DEFAULTS = {
     background: "light",
     interpolation: "srgb",
     darkAlphaGamma: 0.55,
-    darkChroma: 1.15,
+    darkChroma: 1.25,
     blendMode: "source-over",
   },
   motion: {
@@ -570,12 +570,21 @@ const SPRING_EPS = 0.001;
 // never exceeds INSET, so the feather is inert there (see writeNeonPixel).
 const CORNER_FEATHER_PX = 1.5;
 
-// Width (px of edge distance) of the corner-continuity crossfade: strip
-// columns past the diagonal-cut span (BAND − RIM columns from the corner
-// tile) fade from the shared corner-midpoint noise profile back to their own
-// edge-projected profile over this many columns, and are byte-identical
-// beyond it. See the corner-continuity block in createAuraEngine.
-const CORNER_BLEND_FADE_PX = 25;
+// Depth (px) over which a near-corner strip column crossfades — WITH DEPTH,
+// not across columns — from its own live profile to the shared corner-midpoint
+// profile. The window completes (weight 1) exactly at the diagonal-cut depth,
+// where the two owning strips meet and must agree; shallower pixels keep the
+// column's own live noise, so the bright core/bloom never freezes into a flat
+// band. See the corner-continuity block in createAuraEngine.
+const CORNER_DEPTH_FADE_PX = 16;
+
+// Column span, adjacent to a corner TILE, over which the depth-crossfade is
+// additionally lifted at SHALLOW depths so the strip meets the tile (which
+// renders wholly on the midpoint profile) without a boundary step — most
+// visible at the TL noise-wrap seam. Only the first few columns are touched;
+// a ~10-column shallow lift is imperceptible. Columns past it keep live noise
+// at shallow depth (only the deep diagonal-cut region freezes).
+const CORNER_TILE_ADJ_COLS = 10;
 
 // ---------------------------------------------------------------------------
 // Internal types
@@ -892,12 +901,12 @@ export function createAuraEngine(
       : DARK_BG
         ? NORMALIZE_REF_DARK
         : NORMALIZE_REF;
-    // Core whiten: background-dependent default (0.32 on dark, 0.2 on light);
+    // Core whiten: background-dependent default (0.35 on dark, 0.2 on light);
     // an explicit user value wins over both.
     CORE_WHITEN = userSetCoreWhiten
       ? pal.coreWhiten
       : DARK_BG
-        ? 0.32
+        ? 0.35
         : EDGE_AURA_DEFAULTS.palette.coreWhiten;
     // Stop interpolation space (build-time only). Anything but "oklab" is the
     // byte-identical "srgb" lerp.
@@ -1201,26 +1210,41 @@ export function createAuraEngine(
   // fully decorrelated (they are not perimeter-periodic). The resulting
   // amplitude/width step is sub-quantization on light backgrounds but the
   // darkAlphaGamma response lifts deep-bloom alphas several-fold and exposes
-  // it as a brightness seam. Fix by construction, in PROFILE space (an
-  // arc-position blend cannot work at TL — no s-space path crosses the noise
-  // wrap smoothly): once per frame, snap the noise profile at each corner's
-  // arc midpoint; every strip column whose diagonal cut can exist (the first
-  // max(0, BAND − RIM) columns from the corner tile) uses that shared
-  // profile outright, then crossfades back to its own edge-projected profile
-  // over CORNER_BLEND_FADE_PX columns. Both diagonal owners share the same
-  // per-column corner distance, hence the same blend weight, so they
-  // converge to the SAME profile everywhere the diagonal exists and the step
-  // vanishes; columns past the fade are untouched (byte-identical). Corner
-  // tiles copy the midpoint profile too, which also closes the wrap seam at
+  // it as a brightness seam.
+  //
+  // Fix by construction, in PROFILE space (an arc-position blend cannot work
+  // at TL — no s-space path crosses the noise wrap smoothly): once per frame,
+  // snap the noise profile at each corner's arc midpoint. The diagonal cut for
+  // a near-corner column only lives at DEEP depths — a column at distance c
+  // from the corner tile is clipped at depth d ≈ RIM + c (dEnd's diagonal
+  // clamp), so shallow pixels (the bright core + inner bloom) are never on the
+  // cut. So each blended column keeps its OWN live profile at shallow depth and
+  // crossfades — WITH DEPTH — to the shared corner profile over
+  // CORNER_DEPTH_FADE_PX px, completing exactly at the cut depth. Both diagonal
+  // owners reach weight 1 at that shared depth, so they converge to the SAME
+  // profile there and the step vanishes; shallow pixels keep live per-column
+  // noise, so the near-corner core/bloom no longer freezes into a flat band
+  // (the earlier whole-column freeze read as interference at large band). A
+  // small extra shallow lift over the first CORNER_TILE_ADJ_COLS columns closes
+  // the tile/strip boundary (the tile renders wholly on the midpoint profile).
+  // Corner tiles copy the midpoint profile, which also closes the wrap seam at
   // the TL tile/strip boundary. np.env (kindle reveal) is intentionally NOT
-  // blended: it must keep sweeping per arc position and is already
-  // circularly continuous across the wrap.
+  // blended: it must keep sweeping per arc position and is already circularly
+  // continuous across the wrap.
   const cornerNp = [0, 1, 2, 3].map(() => ({
     Ac: 0, coreDen: 0, Ab: 0, bloomDenOut: 0, sbIn: 0, bloomDenIn: 0,
     r: 0, g: 0, b: 0,
   }));
 
   type CornerProfile = (typeof cornerNp)[number];
+
+  // Scratch holding a strip column's OWN (live) profile, snapshotted from np
+  // before a blended column overwrites np per depth — so each depth can lerp
+  // between the live profile and the shared corner profile.
+  const ownNp: CornerProfile = {
+    Ac: 0, coreDen: 0, Ab: 0, bloomDenOut: 0, sbIn: 0, bloomDenIn: 0,
+    r: 0, g: 0, b: 0,
+  };
 
   // Snap the four midpoint profiles for this frame. Runs after
   // resolveHotspots (neonAt reads hotEdge/hotTan) and before the tiles draw.
@@ -1246,20 +1270,29 @@ export function createAuraEngine(
     }
   };
 
-  // Crossfade the current np toward a corner profile (w in [0,1]; w = 1
-  // replaces it exactly). sbIn and bloomDenIn are lerped independently —
-  // sbIn only drives the integer column reach, so the mid-blend mismatch
-  // with 2·sbIn² is confined to a ±1 px cutoff of near-zero alpha.
-  const blendNpToward = (p: CornerProfile, w: number) => {
-    np.Ac += w * (p.Ac - np.Ac);
-    np.coreDen += w * (p.coreDen - np.coreDen);
-    np.Ab += w * (p.Ab - np.Ab);
-    np.bloomDenOut += w * (p.bloomDenOut - np.bloomDenOut);
-    np.sbIn += w * (p.sbIn - np.sbIn);
-    np.bloomDenIn += w * (p.bloomDenIn - np.bloomDenIn);
-    np.r += w * (p.r - np.r);
-    np.g += w * (p.g - np.g);
-    np.b += w * (p.b - np.b);
+  // Snapshot the current np (a column's own live profile) into ownNp.
+  const snapOwnNp = () => {
+    ownNp.Ac = np.Ac; ownNp.coreDen = np.coreDen; ownNp.Ab = np.Ab;
+    ownNp.bloomDenOut = np.bloomDenOut; ownNp.sbIn = np.sbIn;
+    ownNp.bloomDenIn = np.bloomDenIn;
+    ownNp.r = np.r; ownNp.g = np.g; ownNp.b = np.b;
+  };
+
+  // Set np = lerp(ownNp, corner, w) for every field writeNeonPixel reads
+  // (np.env is deliberately left alone — the kindle reveal must keep sweeping
+  // per arc position). sbIn and bloomDenIn lerp independently — sbIn only
+  // drives the integer column reach, so a mid-blend mismatch with 2·sbIn² is
+  // confined to a ±1 px cutoff of near-zero alpha.
+  const lerpNpToCorner = (p: CornerProfile, w: number) => {
+    np.Ac = ownNp.Ac + w * (p.Ac - ownNp.Ac);
+    np.coreDen = ownNp.coreDen + w * (p.coreDen - ownNp.coreDen);
+    np.Ab = ownNp.Ab + w * (p.Ab - ownNp.Ab);
+    np.bloomDenOut = ownNp.bloomDenOut + w * (p.bloomDenOut - ownNp.bloomDenOut);
+    np.sbIn = ownNp.sbIn + w * (p.sbIn - ownNp.sbIn);
+    np.bloomDenIn = ownNp.bloomDenIn + w * (p.bloomDenIn - ownNp.bloomDenIn);
+    np.r = ownNp.r + w * (p.r - ownNp.r);
+    np.g = ownNp.g + w * (p.g - ownNp.g);
+    np.b = ownNp.b + w * (p.b - ownNp.b);
   };
 
   // Per-position neon profile parameters, written into np.  s is the
@@ -1443,6 +1476,45 @@ export function createAuraEngine(
     }
   };
 
+  // Near-corner variant: crossfade the column's OWN profile (already in np,
+  // snapshotted here) to the shared corner profile WITH DEPTH. The depth ramp
+  // completes (weight 1) at the diagonal cut depth `diagCut` — the deepest
+  // pixel this column draws before the diagonal hands the rest to the adjacent
+  // strip — so both owning strips agree there and the seam nulls; shallower
+  // pixels stay on the live per-column profile (no frozen band). `wColFloor`
+  // is a constant per-column shallow lift (>0 only for the first few columns
+  // next to the corner tile) that also pulls those shallow pixels toward the
+  // corner profile so the strip meets the tile without a step. The extra
+  // per-pixel math is confined to near-corner columns; mid-edge columns take
+  // the plain writeColumn path and stay byte-identical.
+  const writeColumnBlend = (
+    data: Uint8ClampedArray,
+    base: number,
+    strideBytes: number,
+    dEnd: number,
+    corner: CornerProfile,
+    diagCut: number,
+    wColFloor: number,
+  ) => {
+    snapOwnNp();
+    // Ramp reaches weight 1 at the deepest drawn diagonal pixel (dEnd − 1 when
+    // the diagonal clips, i.e. diagCut − 1), starting CORNER_DEPTH_FADE_PX px
+    // shallower.
+    const dLo = diagCut - 1 - CORNER_DEPTH_FADE_PX;
+    let idx = base;
+    // No early break here: unlike a single profile, the crossfade makes alpha
+    // NON-monotonic in depth (the column's own bloom fades, then the corner
+    // profile rises to the shared cut value), so a dip below ε mid-crossfade
+    // does not mean the tail is done — breaking would clip the deep corner
+    // tail and re-open the ownership seam. dEnd already bounds the loop by the
+    // corner reach / diagonal clamp, and blended columns are corner-local.
+    for (let d = 0; d < dEnd; d++, idx += strideBytes) {
+      const wDepth = smoothstep01((d - dLo) / CORNER_DEPTH_FADE_PX);
+      lerpNpToCorner(corner, wColFloor > wDepth ? wColFloor : wDepth);
+      writeNeonPixel(data, idx, d + 0.5 - INSET);
+    }
+  };
+
   // Bloom reach (px from the screen edge) for the current inward sigma.
   // The rational tail stays visible to roughly 7σ (vs 3σ for a Gaussian);
   // the early-break in writeColumn trims whatever ends sooner.
@@ -1489,32 +1561,39 @@ export function createAuraEngine(
     const data = buf.img.data;
     data.fill(0);
     const count = cfg.edgeId === TOP || cfg.edgeId === BOTTOM ? buf.cv.width : buf.cv.height;
-    // Corner-continuity spans: the diagonal cut exists while the corner
-    // distance min(g, limit−1−g) = RIM + column-distance can undercut the
-    // bloom reach (≤ BAND), i.e. for the first blendFull columns — those use
-    // the corner profile outright (w = 1); the next CORNER_BLEND_FADE_PX
-    // columns smoothstep back to the strip's own profile; everything past
-    // blendEnd is untouched.
-    const blendFull = Math.max(0, BAND - RIM);
-    const blendEnd = blendFull + CORNER_BLEND_FADE_PX;
     for (let i = 0; i < count; i++) {
       const g = RIM + i; // global coordinate along the edge
       neonAt(cfg.sBase + cfg.sDir * (g + 0.5), cfg.edgeId, g + 0.5);
-      if (i < blendEnd) {
-        blendNpToward(
-          cornerNp[cfg.startCorner],
-          1 - smoothstep01((i - blendFull) / CORNER_BLEND_FADE_PX),
-        );
-      }
+      // Diagonal ownership clamp: this column is handed to the adjacent strip
+      // past `diag`; the nearer corner (start when i ≤ iEnd, else end) owns it.
       const iEnd = count - 1 - i; // column distance from the far corner
-      if (iEnd < blendEnd) {
-        blendNpToward(
-          cornerNp[cfg.endCorner],
-          1 - smoothstep01((iEnd - blendFull) / CORNER_BLEND_FADE_PX),
-        );
+      const diag = Math.min(g, cfg.limit - 1 - g) + cfg.ownBias;
+      const base = cfg.base0 + i * cfg.basePerI;
+      // The diagonal cut only lands within the visible band for near-corner
+      // columns (diag < BAND); those crossfade to the shared corner profile at
+      // depth, so the seam nulls without freezing the shallow core/bloom.
+      // Everything else takes the plain path and is byte-identical to before.
+      if (diag < BAND) {
+        const nearStart = i <= iEnd;
+        const corner = cornerNp[nearStart ? cfg.startCorner : cfg.endCorner];
+        const colDist = nearStart ? i : iEnd;
+        // Clip the deep tail by the CORNER profile's reach, not the column's
+        // own: pixels near the diagonal cut use the corner profile, so adjacent
+        // columns owning the same corner must share the same deepest drawn
+        // depth — otherwise one strip draws a faint tail pixel its neighbour
+        // clips, re-opening a ±1 px seam at the ownership boundary.
+        const dEnd = Math.min(reach(corner.sbIn), diag);
+        // Shallow tile-adjacency lift over the first CORNER_TILE_ADJ_COLS
+        // columns (fades to 0), so the strip meets the midpoint-profile tile
+        // without a boundary step.
+        const wColFloor =
+          colDist < CORNER_TILE_ADJ_COLS
+            ? 1 - smoothstep01(colDist / CORNER_TILE_ADJ_COLS)
+            : 0;
+        writeColumnBlend(data, base, cfg.strideBytes, dEnd, corner, diag, wColFloor);
+      } else {
+        writeColumn(data, base, cfg.strideBytes, Math.min(reach(np.sbIn), diag));
       }
-      const dEnd = Math.min(reach(np.sbIn), Math.min(g, cfg.limit - 1 - g) + cfg.ownBias);
-      writeColumn(data, cfg.base0 + i * cfg.basePerI, cfg.strideBytes, dEnd);
     }
     buf.cx.putImageData(buf.img, 0, 0);
   };

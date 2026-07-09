@@ -256,6 +256,47 @@ describe("background normalization", () => {
     expect(pinned.effRingAlpha).not.toBeCloseTo(0.9, 12);
   });
 
+  it("opal + dark default resolves the DARK reference target — scale exactly 1", () => {
+    // Regression: on a dark page the default normalizeTarget must be
+    // NORMALIZE_REF_DARK, not the light NORMALIZE_REF. With the light reference
+    // the scale would collapse to ~0.37 and effRingAlpha would clamp to the
+    // 0.45 dark floor (the ring renders at half its intended alpha). The dark
+    // reference makes alphaScale exactly 1 → effRingAlpha 0.9.
+    const dark = mk({ palette: { background: "dark" } }).getNormalization();
+    expect(dark.weight).toBe(NORMALIZE_REF_DARK);
+    expect(dark.effRingAlpha).toBe(0.9); // scale exactly 1, not the 0.45 floor
+  });
+
+  it("re-resolves the DEFAULT target when background flips light→dark via updateOptions", () => {
+    // The default target must track the background across a live flip, not stay
+    // pinned to the creation-time light reference.
+    const engine = mk();
+    expect(engine.getNormalization().weight).toBe(NORMALIZE_REF);
+    engine.updateOptions({ palette: { background: "dark" } });
+    const after = engine.getNormalization();
+    expect(after.weight).toBe(NORMALIZE_REF_DARK);
+    expect(after.effRingAlpha).toBe(0.9); // dark reference → scale 1
+    // Equals a fresh dark-created instance.
+    const fresh = mk({ palette: { background: "dark" } }).getNormalization();
+    expect(after.effRingAlpha).toBe(fresh.effRingAlpha);
+  });
+
+  it("keeps an explicit user normalizeTarget across a background flip", () => {
+    // A user-set target must keep winning over the background-derived default
+    // through updateOptions — the light→dark flip must NOT overwrite it.
+    const target = NORMALIZE_REF; // deliberately the light reference
+    const engine = mk({ palette: { normalizeTarget: target } });
+    engine.updateOptions({ palette: { background: "dark" } });
+    const after = engine.getNormalization();
+    // Effective alpha derives from the pinned light target against the dark
+    // weight — NOT the 0.9 the dark default would give.
+    const pinnedRef = mk({
+      palette: { background: "dark", normalizeTarget: target },
+    }).getNormalization();
+    expect(after.effRingAlpha).toBe(pinnedRef.effRingAlpha);
+    expect(after.effRingAlpha).not.toBe(0.9);
+  });
+
   it('never runs the pastel step-down under the dark metric (nebula + "dark" keeps effPastel 0.35)', () => {
     // Regression: the step-down loop lowers pastel to DARKEN colors, which
     // only converges under the light metric. Under the dark metric it would
@@ -307,13 +348,20 @@ describe("pixel snapshot", () => {
    * removing the bloom-amplitude step along the 45° corner-ownership
    * diagonals and at the TL tile boundary (the s = 0 noise wrap).
    *
+   * Regenerated for v0.3.1: the corner-continuity blend moved from a
+   * whole-column freeze (which read as a flat "interference" band near corners
+   * at large band) to a DEPTH crossfade — near-corner columns keep their own
+   * live noise at shallow depths and only converge to the shared corner profile
+   * at the deep diagonal-cut depth. This changes light pixels near the four
+   * corners; mid-edge columns remain byte-identical.
+   *
    * To regenerate after an INTENTIONAL default-appearance change: run this
    * test, copy the "received" hash from the failure output, and update the
    * constant. Any unintentional mismatch is a pixel regression in the default
    * rendering path.
    */
   const SNAPSHOT_SHA256 =
-    "3b936d13bed5621a812df7e87af1ab658e917ef9b6907c017b23b2b3ebe48ab3";
+    "e6bc2d181707ba95d0b23ba0a7f148e2b5ca40fbd43e42679d90e2e7beb70a02";
 
   it("matches the golden hash for the fixed 30-frame sequence", () => {
     const engine = mk({ seed: 42 });
@@ -339,9 +387,13 @@ describe("dark pixel snapshot", () => {
    * (Regenerated with the light snapshot for the corner-continuity seam fix —
    * the defect this fix removes was dark-visible: darkAlphaGamma amplified
    * the bloom step across the corner diagonals.)
+   *
+   * Regenerated for v0.3.1: two dark-only default bumps (coreWhiten 0.32 → 0.35,
+   * darkChroma 1.15 → 1.25) plus the corner depth-crossfade (see the light
+   * snapshot note) all fold into this hash.
    */
   const DARK_SNAPSHOT_SHA256 =
-    "3e1a46f751c3918d930ad972e97da49a0ac9079042e65cc3004d011d920e1c0c";
+    "464c26581c7c75b5eb2e78f2427c0635e3687abdaab0ad6aeff460bf7c5de816";
 
   it("matches the golden hash for the fixed dark 30-frame sequence", () => {
     const engine = mk({ seed: 42, palette: { background: "dark" } });
@@ -409,6 +461,146 @@ describe("corner rounding", () => {
       expect(buf.every((v) => v <= 255)).toBe(true);
     }
   });
+});
+
+describe("corner-continuity seam (v0.3.1 depth crossfade)", () => {
+  // The stub viewport is 800×600 (installStubDom() default); the engine sizes
+  // its canvas from window.innerWidth/Height.
+  const VW = 800, VH = 600;
+
+  // Source-over composite of the 8 disjoint tiles into a W×H alpha grid — the
+  // real engine composites via drawImage (transparent pixels don't overwrite),
+  // so only paint where the source alpha > 0.
+  const compositeAlpha = (
+    bufs: Uint8ClampedArray[],
+    W: number,
+    H: number,
+    BAND: number,
+  ): Float64Array => {
+    const A = new Float64Array(W * H);
+    const CQ = RIM;
+    const put = (buf: Uint8ClampedArray, bw: number, bh: number, ox: number, oy: number) => {
+      for (let y = 0; y < bh; y++) {
+        for (let x = 0; x < bw; x++) {
+          const bi = (y * bw + x) * 4;
+          if (buf[bi + 3] === 0) continue;
+          A[(oy + y) * W + (ox + x)] = buf[bi + 3];
+        }
+      }
+    };
+    const topW = W - 2 * RIM, leftH = H - 2 * RIM;
+    put(bufs[TILE.top], topW, BAND, RIM, 0);
+    put(bufs[TILE.bottom], topW, BAND, RIM, H - BAND);
+    put(bufs[TILE.left], BAND, leftH, 0, RIM);
+    put(bufs[TILE.right], BAND, leftH, W - BAND, RIM);
+    put(bufs[TILE.TL], CQ, CQ, 0, 0);
+    put(bufs[TILE.TR], CQ, CQ, W - CQ, 0);
+    put(bufs[TILE.BR], CQ, CQ, W - CQ, H - CQ);
+    put(bufs[TILE.BL], CQ, CQ, 0, H - CQ);
+    return A;
+  };
+
+  // Max |Δalpha| across the 45° ownership diagonal at each corner, over ring
+  // depths [RIM, dHi]: the two owning strips' pixels straddling the diagonal sit
+  // at equal ring depth and must agree (both converge to the shared corner
+  // profile at the cut depth). Property preserved from the previous whole-column
+  // blend; here it must survive the switch to a depth crossfade.
+  const maxDiagonalSeam = (A: Float64Array, W: number, H: number, BAND: number): number => {
+    const at = (x: number, y: number) => A[y * W + x];
+    const dHi = Math.min(BAND - 1, 70);
+    let m = 0;
+    for (let D = RIM; D <= dHi; D++) {
+      const k = D - RIM;
+      // TL: top (RIM+k, RIM+k) vs left (RIM+k, RIM+k+1)
+      m = Math.max(m, Math.abs(at(RIM + k, RIM + k) - at(RIM + k, RIM + k + 1)));
+      // TR: top (W-1-(RIM+k), RIM+k) vs right (W-1-(RIM+k), RIM+k+1)
+      m = Math.max(
+        m,
+        Math.abs(at(W - 1 - (RIM + k), RIM + k) - at(W - 1 - (RIM + k), RIM + k + 1)),
+      );
+      // BR: bottom (W-1-(RIM+k), H-1-(RIM+k)) vs right (…, -1 in y)
+      m = Math.max(
+        m,
+        Math.abs(
+          at(W - 1 - (RIM + k), H - 1 - (RIM + k)) -
+            at(W - 1 - (RIM + k), H - 1 - (RIM + k) - 1),
+        ),
+      );
+      // BL: bottom (RIM+k, H-1-(RIM+k)) vs left (…, -1 in y)
+      m = Math.max(
+        m,
+        Math.abs(at(RIM + k, H - 1 - (RIM + k)) - at(RIM + k, H - 1 - (RIM + k) - 1)),
+      );
+    }
+    return m;
+  };
+
+  // TL corner-tile boundary step: tile right edge (x=RIM-1) vs top strip left
+  // column (x=RIM) over shallow rows, and tile bottom edge (y=RIM-1) vs left
+  // strip top row (y=RIM) over shallow cols. This is the s=0 noise-wrap side.
+  const tlTileBoundaryStep = (A: Float64Array, W: number): number => {
+    const at = (x: number, y: number) => A[y * W + x];
+    let m = 0;
+    for (let y = 0; y < RIM; y++) m = Math.max(m, Math.abs(at(RIM - 1, y) - at(RIM, y)));
+    for (let x = 0; x < RIM; x++) m = Math.max(m, Math.abs(at(x, RIM - 1) - at(x, RIM)));
+    return m;
+  };
+
+  // Fraction of adjacent near-corner column pairs that DIFFER at inner-bloom
+  // depths — a proxy for live per-column noise. The pre-fix whole-column freeze
+  // drove this to ~0 (the flat "interference" band); the depth crossfade keeps
+  // shallow depths live, so it rises to the natural mid-edge rate.
+  const nearCornerLiveness = (top: Uint8ClampedArray, W: number): number => {
+    const topW = W - 2 * RIM;
+    const rowStride = topW * 4;
+    let distinct = 0, total = 0;
+    for (let d = 8; d <= 30; d++) {
+      for (let i = 12; i < 60; i++) {
+        const a = d * rowStride + i * 4;
+        const b = d * rowStride + (i + 1) * 4;
+        const same =
+          top[a] === top[b] && top[a + 1] === top[b + 1] &&
+          top[a + 2] === top[b + 2] && top[a + 3] === top[b + 3];
+        if (!same) distinct++;
+        total++;
+      }
+    }
+    return distinct / total;
+  };
+
+  const settle = (band: number) => {
+    const engine = mk({ seed: 42, geometry: { band }, palette: { background: "dark" } });
+    for (let f = 0; f < 8; f++) engine.step(16.7);
+    return engine;
+  };
+
+  it.each([76, 120])(
+    "nulls the diagonal seam at all four corners (band %i, dark) ≤ 2/255",
+    (band) => {
+      const bufs = captureBuffers(settle(band));
+      const A = compositeAlpha(bufs, VW, VH, band);
+      expect(maxDiagonalSeam(A, VW, VH, band)).toBeLessThanOrEqual(2);
+    },
+  );
+
+  it.each([76, 120])(
+    "keeps the TL corner-tile boundary step ≤ 3/255 (band %i, dark)",
+    (band) => {
+      const bufs = captureBuffers(settle(band));
+      const A = compositeAlpha(bufs, VW, VH, band);
+      expect(tlTileBoundaryStep(A, VW)).toBeLessThanOrEqual(3);
+    },
+  );
+
+  it.each([76, 120])(
+    "keeps live per-column noise at shallow depths outside the tile-adjacent span (band %i)",
+    (band) => {
+      const bufs = captureBuffers(settle(band));
+      // Well above the pre-fix frozen-band rate (~0.004); the natural mid-edge
+      // rate for this scene is ~0.23.
+      expect(nearCornerLiveness(bufs[TILE.top], VW)).toBeGreaterThan(0.05);
+    },
+  );
 });
 
 describe("palette determinism (stops, not name)", () => {
