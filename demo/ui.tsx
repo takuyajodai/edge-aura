@@ -145,6 +145,7 @@ export function SegmentedControl<T extends string>({
 
 export function SliderRow({
   label,
+  caption,
   value,
   min,
   max,
@@ -153,6 +154,8 @@ export function SliderRow({
   format,
 }: {
   label: string;
+  /** One-line muted hint under the label — what moving this slider changes visually. */
+  caption?: string;
   value: number;
   min: number;
   max: number;
@@ -164,7 +167,10 @@ export function SliderRow({
   const pct = ((value - min) / (max - min)) * 100;
   return (
     <div className="slider-row">
-      <label className="ctl-label">{label}</label>
+      <div className="ctl-label-group">
+        <label className="ctl-label">{label}</label>
+        {caption && <span className="ctl-caption">{caption}</span>}
+      </div>
       <div className="slider-wrap">
         <input
           type="range"
@@ -236,14 +242,20 @@ export function CopyButton({
 
 export function ControlRow({
   label,
+  caption,
   children,
 }: {
   label: string;
+  /** One-line muted hint under the label — what this control changes. */
+  caption?: string;
   children: ReactNode;
 }) {
   return (
     <div className="control-row">
-      <span className="ctl-label">{label}</span>
+      <div className="ctl-label-group">
+        <span className="ctl-label">{label}</span>
+        {caption && <span className="ctl-caption">{caption}</span>}
+      </div>
       <div className="control-right">{children}</div>
     </div>
   );

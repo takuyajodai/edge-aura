@@ -31,7 +31,8 @@
   --muted: #6a6a76;
   --faint: #9a9aa4;
   --code-bg: #f6f6f9;
-  --shadow: 0 1px 2px rgba(18, 18, 26, 0.04), 0 8px 24px rgba(18, 18, 26, 0.05);
+  /* Hairline elevation only — no heavy multi-layer drop shadows. */
+  --shadow: 0 1px 2px rgba(18, 18, 26, 0.06);
 }
 
 :root[data-theme="dark"] {
@@ -45,7 +46,10 @@
   --muted: #9c9caa;
   --faint: #6d6d7a;
   --code-bg: #17171e;
-  --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 10px 30px rgba(0, 0, 0, 0.4);
+  /* Near-none in dark — borders alone carry the edge. Zero-alpha (not the
+     `none` keyword) so it stays valid when combined in multi-layer
+     box-shadow lists (e.g. alongside an inset accent underline). */
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0);
 }
 
 * {
@@ -100,6 +104,9 @@ a {
 }
 
 /* -- Header --------------------------------------------------------------- */
+/* Transparent by design — the glow (z-index 60) paints over page chrome, so
+   the header carries no background strip or blur band. Its content is
+   inset well clear of the glow's brightest (outermost) core instead. */
 .site-header {
   position: sticky;
   top: 0;
@@ -108,10 +115,19 @@ a {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 16px 0;
-  background: color-mix(in srgb, var(--bg) 78%, transparent);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
+  padding: 26px 0 20px;
+  background: transparent;
+  transition: background var(--dur) var(--ease), padding var(--dur) var(--ease),
+    box-shadow var(--dur) var(--ease), backdrop-filter var(--dur) var(--ease);
+}
+/* Scrolled: page content would collide with the floating text — fade in a
+   translucent panel (beam-style) and tighten the padding. */
+.site-header.is-scrolled {
+  padding: 12px 0 12px;
+  background: var(--panel);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  box-shadow: 0 1px 0 var(--border);
 }
 
 .wordmark {
@@ -257,6 +273,19 @@ a {
   color: var(--text);
   white-space: nowrap;
 }
+.ctl-label-group {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.ctl-caption {
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.4;
+  color: var(--faint);
+  white-space: normal;
+}
 
 /* -- Segmented control ---------------------------------------------------- */
 .seg {
@@ -289,7 +318,9 @@ a {
 .seg-item.is-active {
   color: var(--text);
   background: var(--panel-solid);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
+  /* Hairline elevation + an accent underline tint for the active segment —
+     no heavy multi-layer drop shadow. */
+  box-shadow: var(--shadow), inset 0 -2px 0 rgba(var(--accent), 0.9);
 }
 .seg-item.is-active::first-letter {
   color: inherit;
@@ -297,11 +328,6 @@ a {
 .seg-sm .seg-item {
   padding: 5px 11px;
   font-size: 12.5px;
-}
-/* Accent underline tint for the active segment */
-.seg-item.is-active {
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12),
-    inset 0 -2px 0 rgba(var(--accent), 0.9);
 }
 
 /* -- Sliders -------------------------------------------------------------- */
@@ -387,10 +413,11 @@ a {
   font-weight: var(--fw-semi);
   padding: 9px 16px;
   border-radius: var(--r-pill);
-  border: 1px solid var(--border-strong);
+  border: 1px solid var(--border);
   background: var(--panel-solid);
   color: var(--text);
   cursor: pointer;
+  box-shadow: var(--shadow);
   transition: border-color var(--dur) var(--ease), background var(--dur) var(--ease),
     transform var(--dur) var(--ease);
 }
@@ -487,11 +514,12 @@ a {
   font-weight: var(--fw-semi);
   padding: 7px 13px;
   border-radius: var(--r-pill);
-  border: 1px solid var(--border-strong);
+  border: 1px solid var(--border);
   background: var(--panel-solid);
   color: var(--text);
   cursor: pointer;
   white-space: nowrap;
+  box-shadow: var(--shadow);
   transition: border-color var(--dur) var(--ease), color var(--dur) var(--ease);
 }
 .copy-btn:hover {
@@ -504,6 +532,7 @@ a {
 .copy-btn.ghost {
   border-color: transparent;
   background: transparent;
+  box-shadow: none;
 }
 .copy-btn.ghost:hover {
   background: var(--track);
@@ -555,6 +584,10 @@ a {
 @media (max-width: 560px) {
   .page {
     padding: 0 16px 72px;
+  }
+  .site-header {
+    padding: 18px 0 14px;
+    gap: 8px;
   }
   .tune-grid {
     grid-template-columns: 1fr;

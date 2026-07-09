@@ -174,6 +174,17 @@ function Demo() {
   const typingTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const t = STRINGS[lang];
+  const [scrolled, setScrolled] = useState(false);
+
+  // The header is transparent at the top so the glow shows through; once the
+  // page scrolls, content would collide with the floating text — fade a
+  // panel background in past a small threshold.
+  useEffect(() => {
+    const onScroll = () => setScrolled(window.scrollY > 24);
+    onScroll();
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => window.removeEventListener("scroll", onScroll);
+  }, []);
 
   // Persist + reflect language on <html lang>.
   useEffect(() => {
@@ -231,6 +242,10 @@ function Demo() {
     // the key, then deriveMotion clears HIGHLIGHT_ON).
     const highlight =
       sliders.highlightArcDeg > 0 ? { arcDeg: sliders.highlightArcDeg } : undefined;
+    // Palette defaults minus the two background-dependent keys (see the palette
+    // section below for why they must not be spread).
+    const { coreWhiten: _cw, normalizeTarget: _nt, ...palDefaults } = D.palette;
+    void _cw; void _nt;
     // Every section is FULLY specified (engine defaults spread first, then the
     // preset base, then the slider-owned fields). updateOptions key-merges and
     // cannot express "reset to default", so any key omitted here would keep its
@@ -245,12 +260,22 @@ function Demo() {
         cornerRadius: sliders.cornerRadius,
         inset: sliders.inset,
       },
+      // coreWhiten and normalizeTarget have BACKGROUND-DEPENDENT engine defaults
+      // (a hotter core and the dark reference weight on "dark"). EDGE_AURA_DEFAULTS
+      // carries only their LIGHT values, so spreading the whole defaults object
+      // would force the light reference on dark — collapsing the normalization
+      // scale and clamping effRingAlpha to the 0.45 dark floor (the ring shows at
+      // half its intended alpha). Omit both so the engine resolves each by
+      // `background`; no preset sets them, so nothing goes stale.
       palette: {
-        ...D.palette,
+        ...palDefaults,
         ...base.palette,
         ringAlpha: sliders.ringAlpha,
         pastel: sliders.pastel,
         background: theme,
+        // Showcase the luminous pipeline in dark mode: explicit opt-in, not an
+        // engine default (see engine.ts EDGE_AURA_DEFAULTS.palette.blendMode).
+        ...(theme === "dark" ? { blendMode: "plus-lighter" as const } : {}),
       },
       motion: {
         ...D.motion,
@@ -300,7 +325,7 @@ function Demo() {
         active={active}
         options={options}
         kindleOrigin={kindleOrigin}
-        style={{ zIndex: 0 }}
+        style={{ zIndex: 60 }}
       />
 
       <div
@@ -314,7 +339,7 @@ function Demo() {
           );
         }}
       >
-        <header className="site-header">
+        <header className={scrolled ? "site-header is-scrolled" : "site-header"}>
           <a className="wordmark" href="#top">
             edge<span className="wordmark-dash">-</span>aura
           </a>
@@ -373,7 +398,7 @@ function Demo() {
           <section id="playground" className="panel" aria-label={t.playground}>
             <p className="eyebrow">{t.playground}</p>
 
-            <ControlRow label={t.palette}>
+            <ControlRow label={t.palette} caption={t.paletteCaption}>
               <SegmentedControl<EdgeAuraPaletteName>
                 ariaLabel={t.palette}
                 value={palette}
@@ -382,7 +407,7 @@ function Demo() {
               />
             </ControlRow>
 
-            <ControlRow label={t.preset}>
+            <ControlRow label={t.preset} caption={t.presetCaption}>
               <SegmentedControl<PresetChoice>
                 ariaLabel={t.preset}
                 value={preset}
@@ -394,22 +419,22 @@ function Demo() {
             <div className="divider" />
 
             <div className="tune-grid" role="group" aria-label={t.tune}>
-              <SliderRow label={t.thickness} value={sliders.band} min={30} max={120}
-                step={2} onChange={(v) => setSlider("band", v)} format={px} />
-              <SliderRow label={t.cornerRadius} value={sliders.cornerRadius} min={0}
-                max={40} step={1} onChange={(v) => setSlider("cornerRadius", v)} format={px} />
-              <SliderRow label={t.inset} value={sliders.inset} min={0} max={12}
-                step={1} onChange={(v) => setSlider("inset", v)} format={px} />
-              <SliderRow label={t.opacity} value={sliders.ringAlpha} min={0.3} max={1}
-                step={0.01} onChange={(v) => setSlider("ringAlpha", v)} format={dec} />
-              <SliderRow label={t.pastel} value={sliders.pastel} min={0} max={0.8}
-                step={0.01} onChange={(v) => setSlider("pastel", v)} format={dec} />
-              <SliderRow label={t.idleSpeed} value={sliders.rotateIdleS} min={2} max={20}
-                step={0.5} onChange={(v) => setSlider("rotateIdleS", v)} format={idle} />
-              <SliderRow label={t.hueDrift} value={sliders.hueDriftDeg} min={0} max={45}
-                step={1} onChange={(v) => setSlider("hueDriftDeg", v)} format={deg} />
-              <SliderRow label={t.highlight} value={sliders.highlightArcDeg} min={0}
-                max={140} step={5} onChange={(v) => setSlider("highlightArcDeg", v)} format={deg} />
+              <SliderRow label={t.thickness} caption={t.thicknessCaption} value={sliders.band}
+                min={30} max={120} step={2} onChange={(v) => setSlider("band", v)} format={px} />
+              <SliderRow label={t.cornerRadius} caption={t.cornerRadiusCaption} value={sliders.cornerRadius}
+                min={0} max={40} step={1} onChange={(v) => setSlider("cornerRadius", v)} format={px} />
+              <SliderRow label={t.inset} caption={t.insetCaption} value={sliders.inset}
+                min={0} max={12} step={1} onChange={(v) => setSlider("inset", v)} format={px} />
+              <SliderRow label={t.opacity} caption={t.opacityCaption} value={sliders.ringAlpha}
+                min={0.3} max={1} step={0.01} onChange={(v) => setSlider("ringAlpha", v)} format={dec} />
+              <SliderRow label={t.pastel} caption={t.pastelCaption} value={sliders.pastel}
+                min={0} max={0.8} step={0.01} onChange={(v) => setSlider("pastel", v)} format={dec} />
+              <SliderRow label={t.idleSpeed} caption={t.idleSpeedCaption} value={sliders.rotateIdleS}
+                min={2} max={20} step={0.5} onChange={(v) => setSlider("rotateIdleS", v)} format={idle} />
+              <SliderRow label={t.hueDrift} caption={t.hueDriftCaption} value={sliders.hueDriftDeg}
+                min={0} max={45} step={1} onChange={(v) => setSlider("hueDriftDeg", v)} format={deg} />
+              <SliderRow label={t.highlight} caption={t.highlightCaption} value={sliders.highlightArcDeg}
+                min={0} max={140} step={5} onChange={(v) => setSlider("highlightArcDeg", v)} format={deg} />
             </div>
 
             <div className="divider" />
