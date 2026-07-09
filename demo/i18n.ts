@@ -23,16 +23,26 @@ export interface Dict {
   // Playground
   playground: string; // muted section eyebrow
   palette: string;
+  paletteCaption: string; // one-line hint under the Palette row label
   preset: string;
+  presetCaption: string; // one-line hint under the Preset row label
   tune: string;
   thickness: string;
-  cornerRadius: string;
+  thicknessCaption: string; // one-line hint under each slider label —
+  cornerRadius: string; //   what the user will SEE when moving it
+  cornerRadiusCaption: string;
   inset: string;
+  insetCaption: string;
   opacity: string;
+  opacityCaption: string;
   pastel: string;
+  pastelCaption: string;
   idleSpeed: string;
+  idleSpeedCaption: string;
   hueDrift: string;
+  hueDriftCaption: string;
   highlight: string;
+  highlightCaption: string;
   off: string;
   idleUnit: string; // e.g. "s/turn"
   actions: string; // muted label for the action row
@@ -68,16 +78,26 @@ const en: Dict = {
 
   playground: "Playground",
   palette: "Palette",
+  paletteCaption: "Swaps the glow's overall color scheme and mood.",
   preset: "Preset",
+  presetCaption: "Jumps to a ready-made combination of the settings below.",
   tune: "Tune",
   thickness: "Thickness",
+  thicknessCaption: "How deep the glow reads before fading toward the center.",
   cornerRadius: "Corner radius",
+  cornerRadiusCaption: "Rounds the glow's corners to match your screen's curve.",
   inset: "Inset",
+  insetCaption: "Pulls the glow's edge in from the screen's outer rim.",
   opacity: "Opacity",
+  opacityCaption: "Controls how bright and solid the glow's core appears.",
   pastel: "Pastel",
+  pastelCaption: "Softens saturated hues into a lighter, milkier tone.",
   idleSpeed: "Idle speed",
+  idleSpeedCaption: "How fast the glow drifts around the screen when idle.",
   hueDrift: "Hue drift",
+  hueDriftCaption: "Lets the glow's color wander slightly as it moves.",
   highlight: "Highlight",
+  highlightCaption: "Adds a brighter, moving arc of light along the glow.",
   off: "off",
   idleUnit: "s/turn",
   actions: "Actions",
@@ -111,16 +131,26 @@ const ja: Dict = {
 
   playground: "プレイグラウンド",
   palette: "パレット",
+  paletteCaption: "光の配色パターンを切り替えます",
   preset: "プリセット",
+  presetCaption: "下の設定をまとめて切り替えるプリセットです",
   tune: "微調整",
   thickness: "太さ",
+  thicknessCaption: "光の帯の奥行き。広げるほど内側へ溶け込みます",
   cornerRadius: "角の丸み",
+  cornerRadiusCaption: "角の曲がり具合。丸くするほど画面になじみます",
   inset: "内側の余白",
+  insetCaption: "画面端からの距離。離すほど光が内側に浮きます",
   opacity: "不透明度",
+  opacityCaption: "光の濃さ。上げるほどくっきり明るくなります",
   pastel: "パステル",
+  pastelCaption: "色の淡さ。上げるほど白っぽく優しい発色に",
   idleSpeed: "回転の速さ",
+  idleSpeedCaption: "待機中に光が一周する速さです",
   hueDrift: "色相のゆらぎ",
+  hueDriftCaption: "回転中に色相がゆっくり揺れ動く幅です",
   highlight: "ハイライト",
+  highlightCaption: "光の帯に明るいハイライトの弧を加えます",
   off: "オフ",
   idleUnit: "秒/回転",
   actions: "操作",

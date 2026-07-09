@@ -1,6 +1,6 @@
 {
   "name": "edge-aura",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Organic screen-edge glow — framework-agnostic Canvas 2D engine with spring physics, palette LUT, and a thin React adapter.",
   "keywords": [
     "glow",

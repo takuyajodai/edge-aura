@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-07-10
+
+### Fixed
+
+- Dark backgrounds rendered at half the intended alpha: the demo spread
+  `EDGE_AURA_DEFAULTS.palette` into its options, pinning the *light*
+  `normalizeTarget` (and `coreWhiten`) as explicit user values, which
+  clamped `effRingAlpha` to the 0.45 floor. The engine's by-background
+  default resolution was already correct and is now locked by regression
+  tests (default opal on dark → `effRingAlpha` 0.90; live background flips
+  re-resolve the default; explicit user targets survive flips).
+- Near-corner "frozen noise" bands at large `band` values: the corner-seam
+  profile snapshot froze entire columns; now a depth crossfade keeps shallow
+  pixels on each column's live noise and converges to the shared corner
+  profile exactly at the ownership-diagonal cut (seam stays 0/255 at
+  band 76 and 120; mid-edge pixels byte-identical).
+
+### Changed
+
+- Dark-background defaults tuned brighter: `coreWhiten` 0.35 (was 0.32),
+  `darkChroma` 1.25 (was 1.15).
+- Demo: the glow overlay now paints above the page chrome and the header is
+  transparent-inset (no more header/edge overlap), gaining a translucent
+  panel only after scroll; hairline shadows replace the heavy ones; every
+  playground control has a one-line EN/JA caption; the dark theme showcases
+  `blendMode: "plus-lighter"` (reflected in the generated snippet).
+
 ## [0.3.0] - 2026-07-09
 
 ### Added
