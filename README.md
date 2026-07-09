@@ -5,11 +5,12 @@
 
 <img src="https://raw.githubusercontent.com/takuyajodai/edge-aura/main/docs/hero.png" alt="edge-aura — an organic glow ring hugging the viewport edges, with a tap bloom on the bottom edge" width="100%">
 
-An organic, Siri-style screen-edge glow: a rounded-rectangle "neon tube"
-hugging the viewport edges — a bright undulating core line plus a soft
-asymmetric bloom whose inner face dissolves with no perceptible end. The hue
-cycles continuously around the ring; tap, keystroke, and save-pulse inputs
-inject energy that swells localized hotspots through spring physics.
+An organic screen-edge glow, inspired by the ambient edge glows of on-device
+assistants (e.g. Apple's Siri): a rounded-rectangle "neon tube" hugging the
+viewport edges — a bright undulating core line plus a soft asymmetric bloom
+whose inner face dissolves with no perceptible end. The hue cycles
+continuously around the ring; tap, keystroke, and save-pulse inputs inject
+energy that swells localized hotspots through spring physics.
 
 The core engine is **framework-agnostic** (plain TypeScript + Canvas 2D,
 **zero dependencies**, no React imports). A React adapter is provided as a
@@ -144,7 +145,7 @@ if (pos) window.dispatchEvent(new CustomEvent("aura:key", { detail: pos }));
 ## Palette presets
 
 Named stop arrays are exported as `EDGE_AURA_PALETTES` (the engine's default
-is `EDGE_AURA_PALETTES.siri`). Every preset is a full hue cycle whose first
+is `EDGE_AURA_PALETTES.opal`). Every preset is a full hue cycle whose first
 and last stops match, so the loop wraps seamlessly. Stop arrays are typed
 `EdgeAuraPaletteStops` — an array of `EdgeAuraPaletteStop`
 (`[position, [r, g, b]]`) entries. (`PaletteStops` is a deprecated alias of
@@ -160,7 +161,8 @@ const engine = createAuraEngine(canvas, {
 
 | Preset | Character |
 |---|---|
-| `siri` | Stock Siri-style mesh gradient (full rainbow cycle) — the default |
+| `opal` | Organic mesh gradient — non-uniform stops, warm knot into a cool exhale — the default |
+| `spectrum` | Full-spectrum rainbow cycle — the loudest option |
 | `aurora` | Cool tones only: emerald / near-white / ice cyan / sky blue |
 | `sunset` | Warm dusk oranges and magentas |
 | `ocean` | Deep blues and teals |
@@ -241,12 +243,12 @@ should degrade gracefully on garbage numbers, not crash the host.
 
 | Option | Default | Description |
 |---|---|---|
-| `stops` | Siri-style 9 stops | Gradient stops `[position, [r, g, b]]`; first at 0, last at 1 |
+| `stops` | Opal's 8 stops | Gradient stops `[position, [r, g, b]]`; first at 0, last at 1 |
 | `pastel` | `0.35` | Mix toward white at LUT build time (0 = raw colors) |
 | `coreWhiten` | `0.2` | How strongly the core line whitens toward 255 (neon feel) |
 | `ringAlpha` | `0.90` | Max alpha cap — the page always shows through slightly |
 | `normalize` | `true` | Perceptual weight normalization (see below) |
-| `normalizeTarget` | `NORMALIZE_REF` (`NORMALIZE_REF_DARK` when `background: "dark"`) | Target perceptual weight (siri @ pastel 0.35, measured against the configured background); an explicit value always wins |
+| `normalizeTarget` | `NORMALIZE_REF` (`NORMALIZE_REF_DARK` when `background: "dark"`) | Target perceptual weight (opal @ pastel 0.35, measured against the configured background); an explicit value always wins |
 | `background` | `"light"` | Page background the normalization equalizes against — `"dark"` flips the weight metric to distance-from-black (see below) |
 
 ### `motion`
@@ -293,14 +295,14 @@ the engine equalizes this at creation time:
   "dark"` darkening colors would move weight *away* from the target, so
   there the alpha clamp alone is the best effort and `pastel` is never
   touched.)
-- The target defaults to `NORMALIZE_REF`, the weight of the stock `siri`
+- The target defaults to `NORMALIZE_REF`, the weight of the stock `opal`
   palette at pastel 0.35, so the default palette is pixel-identical with
   normalization on or off.
 
 **Dark pages:** `palette: { background: "dark" }` flips the metric to
 distance-from-*black* (perceptual weight = mean `relativeLuminance`), so
 normalization equalizes palettes against dark backgrounds instead. The
-default target then becomes `NORMALIZE_REF_DARK` (the stock `siri` palette
+default target then becomes `NORMALIZE_REF_DARK` (the stock `opal` palette
 at pastel 0.35 measured with the dark metric), so the default palette again
 renders identically with normalization on or off; an explicit
 `normalizeTarget` still wins. Note that `pastel` always mixes stops toward
