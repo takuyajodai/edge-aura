@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-07-10
+
+### Added
+
+- `geometry.cornerFill?: boolean` (default `false`) — opt-in: fill the
+  square viewport corners with a smooth radial continuation of the glow
+  (Gaussian falloff with σ = max(outward bloom σ, 0.75·cornerRadius), C0/C1
+  continuous at the arc) instead of rounding off. Live-togglable via
+  `updateOptions`; the demo gains a Rounded/Filled control.
+- 8×8 Bayer ordered dithering at alpha quantization — breaks the 1/255
+  mach-band contours at the bloom tail so the inner edge dissolves
+  imperceptibly into the background (mean-preserving, ≤1 LSB everywhere).
+
+### Changed
+
+- **Visual:** the five noise streams are now periodic in the ring (integer
+  harmonics of the ring angle, re-derived with geometry) — the undulation
+  flows continuously through the corners and the palette-wrap seam is
+  structurally zero; corner tiles render the live field instead of a frozen
+  arc-midpoint snapshot. The 45° ownership diagonal is an intrinsic
+  medial-axis discontinuity of the arc parameterization (not a noise
+  artifact) and keeps a minimal depth-crossfade (measured ≤1/255).
+- **Visual:** the inner window is C1 — `smoothstep(1 − x⁴)` reaches zero
+  with zero slope (the old `1 − x⁴` ended at slope −4, a perceptible edge).
+- `darkAlphaGamma` LUT input resolution raised 256 → 4096: the smallest
+  non-zero dark alpha drops ~12/255 → ~2.6/255, removing the stippled
+  terminus cliff on dark backgrounds (terminal step now ≤3/255).
+- Default rendered pixels change by design (both golden snapshots
+  regenerated). Frame cost +≈9% (within the 10% budget).
+- Demo: hero title and wordmark set in Fraunces (editorial serif);
+  the highlight slider now displays its arc as a percentage of the ring and
+  the hue-drift caption explains the hue-wheel unit.
+
 ## [0.3.2] - 2026-07-10
 
 ### Fixed
