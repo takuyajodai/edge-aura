@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-07-11
+
+### Changed
+
+- `cornerFill` reworked from a pasted-on radial glow into a single L-path
+  distance field: in fill mode the corner IS the same tube flowing through
+  a square 90° corner (exact signed distance to the sharp-corner
+  centerline; identical core+bloom profile as the straights; exterior
+  vertex near-solid within 0.5/255 of the straights' outward margin; core
+  continuity through the corner within 1/255). Default off remains
+  byte-identical.
+- Demo design pass: hero/wordmark set in Lora (roman — a Plantin-class
+  old-style substitute, chosen over Source Serif 4 / PT Serif / STIX Two by
+  side-by-side comparison); segmented-control active state flattened to a
+  hairline ring (accent underline removed); the scrolled header background
+  and divider bleed full viewport width; Palette/Preset rows centered and
+  single-line in EN; breathing room above the Corners row; the ja footer
+  says "Made by".
+
 ## [0.4.0] - 2026-07-10
 
 ### Added
