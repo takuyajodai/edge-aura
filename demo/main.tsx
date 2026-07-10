@@ -336,18 +336,11 @@ function Demo() {
         style={{ zIndex: 60 }}
       />
 
-      <div
-        className="page"
-        onPointerDown={(e) => {
-          lastPoint.current = { x: e.clientX, y: e.clientY };
-          window.dispatchEvent(
-            new CustomEvent("aura:tap", {
-              detail: { x: e.clientX, y: e.clientY },
-            }),
-          );
-        }}
-      >
-        <header className={scrolled ? "site-header is-scrolled" : "site-header"}>
+      {/* Header lives OUTSIDE .page so its scrolled background + hairline
+          divider can bleed edge-to-edge across the viewport, while the inner
+          wrapper keeps content aligned to the 760px column. */}
+      <header className={scrolled ? "site-header is-scrolled" : "site-header"}>
+        <div className="site-header-inner">
           <a className="wordmark" href="#top">
             edge<span className="wordmark-dash">-</span>aura
           </a>
@@ -386,8 +379,20 @@ function Demo() {
               <GitHubIcon />
             </a>
           </div>
-        </header>
+        </div>
+      </header>
 
+      <div
+        className="page"
+        onPointerDown={(e) => {
+          lastPoint.current = { x: e.clientX, y: e.clientY };
+          window.dispatchEvent(
+            new CustomEvent("aura:tap", {
+              detail: { x: e.clientX, y: e.clientY },
+            }),
+          );
+        }}
+      >
         <main id="top">
           <section className="hero">
             <h1 className="hero-title">edge-aura</h1>
@@ -406,7 +411,11 @@ function Demo() {
           <section id="playground" className="panel" aria-label={t.playground}>
             <p className="eyebrow">{t.playground}</p>
 
-            <ControlRow label={t.palette} caption={t.paletteCaption}>
+            <ControlRow
+              label={t.palette}
+              caption={t.paletteCaption}
+              className="control-row--centered"
+            >
               <SegmentedControl<EdgeAuraPaletteName>
                 ariaLabel={t.palette}
                 value={palette}
@@ -415,7 +424,11 @@ function Demo() {
               />
             </ControlRow>
 
-            <ControlRow label={t.preset} caption={t.presetCaption}>
+            <ControlRow
+              label={t.preset}
+              caption={t.presetCaption}
+              className="control-row--centered"
+            >
               <SegmentedControl<PresetChoice>
                 ariaLabel={t.preset}
                 value={preset}
@@ -444,6 +457,8 @@ function Demo() {
               <SliderRow label={t.highlight} caption={t.highlightCaption} value={sliders.highlightArcDeg}
                 min={0} max={140} step={5} onChange={(v) => setSlider("highlightArcDeg", v)} format={arcPct} />
             </div>
+
+            <div className="divider" />
 
             <ControlRow label={t.corners} caption={t.cornersCaption}>
               <button

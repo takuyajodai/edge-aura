@@ -244,14 +244,17 @@ export function ControlRow({
   label,
   caption,
   children,
+  className,
 }: {
   label: string;
   /** One-line muted hint under the label — what this control changes. */
   caption?: string;
   children: ReactNode;
+  /** Extra class on the row wrapper (e.g. layout variants). */
+  className?: string;
 }) {
   return (
-    <div className="control-row">
+    <div className={className ? `control-row ${className}` : "control-row"}>
       <div className="ctl-label-group">
         <span className="ctl-label">{label}</span>
         {caption && <span className="ctl-caption">{caption}</span>}
