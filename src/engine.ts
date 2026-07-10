@@ -133,15 +133,22 @@ export interface EdgeAuraGeometryOptions {
   innerSoftVar?: number;
   innerSigmaMax?: number;
   /**
-   * Fill the square viewport corners with a smooth radial continuation of the
-   * glow instead of rounding off (default false). With the default rounding,
-   * the corner-exterior region (pixels past the arc, out to the physical square
-   * corner) fades to transparent via the outward feather, giving a beam-style
-   * rounded ring. Set true to instead continue the glow into that region: alpha
-   * falls off from the centerline value with a gentle radial Gaussian (widened
-   * sigma tied to the corner scale), C0/C1-continuous across the arc — no
-   * boundary at the arc or the screen edges — so the corners stay luminous while
-   * still breathing with the field. Togglable live via updateOptions.
+   * Render the ring as a SQUARE tube — the glow flows through the corner and
+   * fills it — instead of rounding off (default false). With the default
+   * rounding, the corner-exterior region (pixels past the arc, out to the
+   * physical square corner) fades to transparent via the outward feather,
+   * giving a beam-style rounded ring. Set true to instead route the SAME tube
+   * straight through a 90° corner: the corner tile's signed distance switches
+   * from the arc's radial metric to the L-shaped sharp-corner centerline path
+   * (perpendicular distance to the nearer straight centerline in the interior,
+   * distance to the corner vertex in the exterior quadrant). The core line runs
+   * crisp into the corner, the bloom fills the interior diagonal with the strips'
+   * own perpendicular metric (C0-continuous with both adjacent strips at the
+   * tile boundaries), and the exterior vertex region renders near-solid exactly
+   * like the straights' outward margin — one distance field, no pasted-on blob,
+   * no feather. `cornerRadius` still shapes the tiles and the arc-length
+   * bookkeeping, but the RENDERED corner is square regardless of CR. Togglable
+   * live via updateOptions.
    */
   cornerFill?: boolean;
 }
@@ -909,13 +916,11 @@ export function createAuraEngine(
   let CQ = 0, ARC = 0;
   let CORE_SIGMA_BASE = 0, CORE_SIGMA_VAR = 0;
   let INNER_SOFT_BASE = 0, INNER_SOFT_VAR = 0, INNER_SIGMA_MAX = 0;
-  // Corner fill (opt-in): when true the corner-exterior region continues the
-  // glow radially instead of feathering to transparent. FILL_DEN_MIN is the
-  // 2σ² floor for that radial Gaussian — 2·(0.75·CR)² — so the fill sigma is
-  // max(outward bloom sigma, 0.75·CR): wide enough that the physical square
-  // corner keeps meaningful luminance. Both derived in deriveGeometry.
+  // Corner fill (opt-in): when true the corner tile's signed distance switches
+  // from the arc's radial metric to the L-shaped sharp-corner centerline path,
+  // so the ring renders as one continuous SQUARE tube (see the cornerFill
+  // option JSDoc and the corner-map build in deriveGeometry). Derived below.
   let CORNER_FILL = false;
-  let FILL_DEN_MIN = 0;
 
   // Bloom depth profile scales with band so the falloff stays SELF-SIMILAR:
   // the sb sigma family (base, noise range, energy contributions, clamp bounds)
@@ -987,8 +992,6 @@ export function createAuraEngine(
     INNER_SOFT_VAR = geo.innerSoftVar;
     INNER_SIGMA_MAX = clampOpt(geo.innerSigmaMax, 1, DEF_GEO.innerSigmaMax);
     CORNER_FILL = geo.cornerFill === true;
-    // 2σ² floor for the corner-fill radial Gaussian: σ ≥ 0.75·CR (see the lets).
-    FILL_DEN_MIN = 2 * (0.75 * CR) * (0.75 * CR);
 
     // Fold BLOOM_SCALE into every sb-pipeline constant (see the block comment
     // above). Only the BLOOM DEPTH family scales: core sigma, the tangential
@@ -1049,14 +1052,15 @@ export function createAuraEngine(
     // because RIM / CR / INSET / ns can all change on a geometry re-derive.
     const rim2 = RIM * RIM;
     const nsSpan = ns - 1;
-    // When filling, cover the WHOLE RIM×RIM tile out to the physical square
-    // corner (tIn down to CR − RIM·√2 < 0), so no exterior pixel is skipped;
-    // otherwise stop one feather past INSET, where the rounded ring dies.
-    const skipBelow = CORNER_FILL ? -Infinity : -(INSET + CORNER_FEATHER_PX);
     for (let kind = 0; kind < 4; kind++) {
       const lcx = CORNER_X_NEG[kind] ? RIM : 0;
       const lcy = CORNER_Y_NEG[kind] ? RIM : 0;
       const thOff = CORNER_TH_OFFSET[kind];
+      // Interior-positive sign of dx/dy per corner: for a corner whose tile
+      // extends in −x from the arc center (X_NEG), moving further −x is more
+      // interior, so ax = CR + dx; otherwise ax = CR − dx. Same for ay.
+      const sx = CORNER_X_NEG[kind] ? 1 : -1;
+      const sy = CORNER_Y_NEG[kind] ? 1 : -1;
       const jm = new Int16Array(rim2);
       const tm = new Float32Array(rim2);
       let li = 0;
@@ -1064,11 +1068,34 @@ export function createAuraEngine(
         for (let lx = 0; lx < RIM; lx++, li++) {
           const dx = lx + 0.5 - lcx;
           const dy = ly + 0.5 - lcy;
-          const tIn = CR - Math.sqrt(dx * dx + dy * dy);
-          if (tIn < skipBelow) { jm[li] = -1; continue; }
-          const f = clamp((Math.atan2(dy, dx) + thOff) / HALF_PI, 0, 1);
-          jm[li] = (f * nsSpan + 0.5) | 0;
-          tm[li] = tIn;
+          if (CORNER_FILL) {
+            // Fill mode: cover the WHOLE RIM×RIM tile (no skip) and store the
+            // EXACT signed distance to the L-shaped sharp-corner centerline path.
+            // ax/ay are the interior-positive perpendicular distances from the
+            // two straight centerlines (ax from the vertical edge, ay from the
+            // horizontal edge), measured so that ax = CR at the arc center and
+            // falls to −INSET at the physical corner. tIn = −hypot in the
+            // exterior vertex quadrant (both ≤ 0 → nearest point is the vertex),
+            // else min(ax, ay) (perpendicular distance to the nearer centerline
+            // segment). In the interior min(ax, ay) is EXACTLY the metric the
+            // adjacent strips use, so the tile is C0-continuous with them; the
+            // arc-sample index keeps the arc's angular parameterization (below),
+            // which is continuous across the diagonal and converges to the shared
+            // vertex/arc-midpoint profile there (see writeNeonPixel).
+            const ax = CR + sx * dx;
+            const ay = CR + sy * dy;
+            tm[li] = ax <= 0 && ay <= 0 ? -Math.hypot(ax, ay) : Math.min(ax, ay);
+            const f = clamp((Math.atan2(dy, dx) + thOff) / HALF_PI, 0, 1);
+            jm[li] = (f * nsSpan + 0.5) | 0;
+          } else {
+            // Rounded mode: radial distance to the arc; stop one feather past
+            // INSET, where the rounded ring dies (jMap = −1 → pixel skipped).
+            const tIn = CR - Math.sqrt(dx * dx + dy * dy);
+            if (tIn < -(INSET + CORNER_FEATHER_PX)) { jm[li] = -1; continue; }
+            const f = clamp((Math.atan2(dy, dx) + thOff) / HALF_PI, 0, 1);
+            jm[li] = (f * nsSpan + 0.5) | 0;
+            tm[li] = tIn;
+          }
         }
       }
       cornerJMap[kind] = jm;
@@ -1670,7 +1697,8 @@ export function createAuraEngine(
   // Shared per-pixel neon profile: core + bloom Gaussians from np, scaled by
   // frame intensity, core whitened toward 255.  tIn is the signed distance
   // to the centerline with INWARD POSITIVE on every segment (straights:
-  // depth − INSET; corners: CR − radialDist) — the bloom picks the wider,
+  // depth − INSET; rounded corners: CR − radialDist; filled corners: the
+  // L-path SDF — see the corner-map build) — the bloom picks the wider,
   // slowly-breathing inward denominator on that side, which is what melts
   // the ring's inner face.  On the outward side (tIn < 0) the profile keeps
   // its flat centerline value (t = 0) — without it the Gaussian would fade
@@ -1680,18 +1708,17 @@ export function createAuraEngine(
   // reach never exceeds INSET − 0.5 px (see writeColumn: tIn = d + 0.5 −
   // INSET, min |tIn| = INSET − 0.5 at d = 0), so the feather is EXACTLY 1
   // there and those pixels are byte-identical to the pre-rounding renderer;
-  // only corner tiles, whose square region extends past INSET, round off —
-  // ending ~INSET px beyond the arc, tangent to both screen edges.
+  // only ROUNDED corner tiles, whose square region extends past INSET, round
+  // off — ending ~INSET px beyond the arc, tangent to both screen edges.
   //
-  // CORNER FILL (opt-in, corner tiles only): when CORNER_FILL is on, the
-  // corner-exterior region (tIn < 0) instead continues the glow radially —
-  // (Ac,Ab) scaled by a Gaussian gFill = exp(−tIn²/max(bloomDenOut, FILL_DEN_MIN))
-  // in the radial distance |tIn|. gFill(0) = 1, so at the arc the fill equals
-  // the flat centerline value the inward side lands on (C0), and both sides'
-  // slopes vanish at tIn = 0 (C1) — no boundary at the arc. The widened sigma
-  // (≥ 0.75·CR) keeps the physical square corner luminous. The outward feather
-  // is disabled here (mutually exclusive); the core term still whitens, fading
-  // with gFill. Straights never enter this branch (inCornerTile is false).
+  // CORNER FILL (opt-in, corner tiles only): the ONLY difference is that the
+  // outward feather is DISABLED, so the profile is exactly the straights' —
+  // core + inward-tail bloom around a centerline — evaluated against the L-path
+  // signed distance that drawCorner passes in. The exterior (tIn < 0) keeps the
+  // flat centerline value (t = 0) with no feather, so the square corner renders
+  // near-solid, identical to the way a straight's outward margin (also t = 0,
+  // feather = 1) reads. There is no separate blob and no radial Gaussian: one
+  // distance field carries the tube straight through the 90° corner.
   //
   // On dark backgrounds the geometric coverage is additionally pushed through
   // the darkAlphaLut response curve (pow(coverage, darkAlphaGamma)) before
@@ -1715,18 +1742,7 @@ export function createAuraEngine(
     const dOff = BAYER8[(px & 7) + ((py & 7) << 3)];
     let core: number, bloom: number;
     let outwardFade = 1;
-    if (CORNER_FILL && inCornerTile && tIn < 0) {
-      // Corner fill: smooth radial continuation of the centerline profile out
-      // into the square-corner exterior. gFill is a Gaussian in the radial
-      // distance |tIn| with a widened sigma (2σ² = max(bloomDenOut, FILL_DEN_MIN),
-      // i.e. σ = max(outward bloom σ, 0.75·CR)); gFill(0) = 1 so the arc value
-      // matches the inward side (C0/C1), and it decays gently so the physical
-      // corner stays luminous. The feather is disabled in this region.
-      const fillDen = np.bloomDenOut > FILL_DEN_MIN ? np.bloomDenOut : FILL_DEN_MIN;
-      const gFill = Math.exp(-(tIn * tIn) / fillDen);
-      core = np.Ac * gFill;
-      bloom = np.Ab * gFill;
-    } else {
+    {
       const t = tIn < 0 ? 0 : tIn;
       const tt = t * t;
       // Core is negligible past tt ≈ 40 (exp(−40/5.8) < 0.001) — skipping the
@@ -1753,8 +1769,10 @@ export function createAuraEngine(
         bloom = np.Ab * Math.exp(-tt / np.bloomDenOut);
       }
       // Outward feather: flat to INSET px, then a CORNER_FEATHER_PX fade to 0.
-      // Exactly 1 for every straight-edge pixel (|tIn| ≤ INSET − 0.5).
-      if (tIn < 0) {
+      // Exactly 1 for every straight-edge pixel (|tIn| ≤ INSET − 0.5). DISABLED
+      // in corner-fill tiles — there the square corner continues near-solid
+      // (the tube flows through) instead of rounding off.
+      if (tIn < 0 && !(CORNER_FILL && inCornerTile)) {
         const aOut = -tIn;
         if (aOut > INSET) {
           outwardFade = 1 - smoothstep01((aOut - INSET) / CORNER_FEATHER_PX);

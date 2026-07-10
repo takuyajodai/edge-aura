@@ -503,28 +503,26 @@ describe("corner rounding", () => {
   });
 });
 
-describe("corner fill (opt-in)", () => {
-  // Local arc-center of each corner tile (bufferX, bufferY), TL/TR/BR/BL order.
-  const CENTERS: Record<number, [number, number]> = {
-    [TILE.TL]: [RIM, RIM],
-    [TILE.TR]: [0, RIM],
-    [TILE.BR]: [0, 0],
-    [TILE.BL]: [RIM, 0],
-  };
-
-  // Pixel (bufX, bufY) `k` steps along the tile's 45° diagonal, k = 0 nearest
-  // the arc center, k = RIM-1 at the physical screen-corner tip. This ray runs
-  // exactly through pixel centers, so radial steps along it are uncontaminated
-  // by tangential (along-arc) profile variation.
-  const diagPix = (kind: number, k: number): [number, number] => {
-    const [cx, cy] = CENTERS[kind];
-    return [cx === 0 ? k : RIM - 1 - k, cy === 0 ? k : RIM - 1 - k];
-  };
-  const tInAt = (kind: number, x: number, y: number): number => {
-    const [cx, cy] = CENTERS[kind];
-    return CR - Math.hypot(x + 0.5 - cx, y + 0.5 - cy);
-  };
+describe("corner fill (opt-in): square-tube L-path distance field", () => {
+  // v0.4.1 rework. cornerFill no longer pastes a radial Gaussian blob over the
+  // rounded tube — it switches the corner tile's signed distance to the L-shaped
+  // sharp-corner centerline path (tIn = min(ax, ay) in the interior, −hypot in
+  // the exterior vertex quadrant) so the SAME tube flows straight through the
+  // 90° corner. The arc-sample index keeps the arc's angular parameterization
+  // (continuous, converging to the shared vertex/arc-midpoint profile on the
+  // diagonal), and the outward feather is disabled. These tests assert the
+  // integration: no seam at the tile boundaries, no discontinuity on the
+  // diagonal, a near-solid exterior, and a core that runs unbroken through the
+  // corner. The stub viewport is 800×600.
+  const W = 800, H = 600;
   const CORNERS = [TILE.TL, TILE.TR, TILE.BR, TILE.BL];
+  // Engine corner-kind flags, indexed by TILE corner (TL/TR/BR/BL).
+  const XNEG: Record<number, boolean> = { [TILE.TL]: true, [TILE.TR]: false, [TILE.BR]: false, [TILE.BL]: true };
+  const YNEG: Record<number, boolean> = { [TILE.TL]: true, [TILE.TR]: true, [TILE.BR]: false, [TILE.BL]: false };
+  // Tile global origin (top-left) on the composited canvas.
+  const ORIGIN: Record<number, [number, number]> = {
+    [TILE.TL]: [0, 0], [TILE.TR]: [W - RIM, 0], [TILE.BR]: [W - RIM, H - RIM], [TILE.BL]: [0, H - RIM],
+  };
 
   // The fixed dark 30-frame golden sequence (tap + key), returning the 8 tiles.
   const darkGolden = (options?: EdgeAuraOptions): Uint8ClampedArray[] => {
@@ -538,6 +536,37 @@ describe("corner fill (opt-in)", () => {
     }
     return bufs;
   };
+  const fillGolden = (band: number) => darkGolden({ geometry: { band, cornerFill: true } });
+
+  // Alpha at global (gx, gy), dispatching to whichever pixel-disjoint tile owns
+  // it (4 corners + 4 strips), so seam pixels on either side of a tile boundary
+  // read from the same coordinate space. `band` = strip depth.
+  const alphaG = (bufs: Uint8ClampedArray[], gx: number, gy: number, band: number): number => {
+    const topW = W - 2 * RIM;
+    if (gx < RIM && gy < RIM) return bufs[TILE.TL][(gy * RIM + gx) * 4 + 3];
+    if (gx >= W - RIM && gy < RIM) return bufs[TILE.TR][(gy * RIM + (gx - (W - RIM))) * 4 + 3];
+    if (gx >= W - RIM && gy >= H - RIM) return bufs[TILE.BR][((gy - (H - RIM)) * RIM + (gx - (W - RIM))) * 4 + 3];
+    if (gx < RIM && gy >= H - RIM) return bufs[TILE.BL][((gy - (H - RIM)) * RIM + gx) * 4 + 3];
+    if (gy < band && gx >= RIM && gx < W - RIM) return bufs[TILE.top][(gy * topW + (gx - RIM)) * 4 + 3];
+    if (gy >= H - band && gx >= RIM && gx < W - RIM) return bufs[TILE.bottom][((gy - (H - band)) * topW + (gx - RIM)) * 4 + 3];
+    if (gx < band && gy >= RIM && gy < H - RIM) return bufs[TILE.left][((gy - RIM) * band + gx) * 4 + 3];
+    if (gx >= W - band && gy >= RIM && gy < H - RIM) return bufs[TILE.right][((gy - RIM) * band + (gx - (W - band))) * 4 + 3];
+    throw new Error(`no tile owns global (${gx}, ${gy})`);
+  };
+  const aTile = (bufs: Uint8ClampedArray[], kind: number, lx: number, ly: number) => bufs[kind][(ly * RIM + lx) * 4 + 3];
+
+  // L-path interior-positive perpendicular distances from the two centerlines
+  // (the engine's fill-mode metric): ax from the vertical edge, ay from the
+  // horizontal edge; tIn = min(ax, ay) interior, −hypot in the vertex quadrant.
+  const axay = (kind: number, lx: number, ly: number): [number, number] => {
+    const lcx = XNEG[kind] ? RIM : 0, lcy = YNEG[kind] ? RIM : 0;
+    const sx = XNEG[kind] ? 1 : -1, sy = YNEG[kind] ? 1 : -1;
+    return [CR + sx * (lx + 0.5 - lcx), CR + sy * (ly + 0.5 - lcy)];
+  };
+  // Diagonal MIRROR of a pixel (swaps ax↔ay → identical tIn, reflected across
+  // the medial-axis diagonal). Main diagonal for TL/BR, anti-diagonal for TR/BL.
+  const mirror = (kind: number, lx: number, ly: number): [number, number] =>
+    kind === TILE.TL || kind === TILE.BR ? [ly, lx] : [RIM - 1 - ly, RIM - 1 - lx];
 
   it("default off is byte-identical to omitting the option (light and dark)", () => {
     for (const bg of ["light", "dark"] as const) {
@@ -553,83 +582,133 @@ describe("corner fill (opt-in)", () => {
     const off = darkGolden();
     const on = darkGolden({ geometry: { cornerFill: true } });
     for (const kind of CORNERS) {
-      // The physical screen-corner tip pixel (farthest from the arc center) is
-      // transparent when rounding off, luminous when filling.
-      const [tx, ty] = diagPix(kind, RIM - 1);
-      const tipOff = off[kind][(ty * RIM + tx) * 4 + 3];
-      const tipOn = on[kind][(ty * RIM + tx) * 4 + 3];
-      expect(tipOff).toBe(0);
-      expect(tipOn).toBeGreaterThan(0);
+      // The physical screen-corner tip pixel (the outermost corner of the tile,
+      // in the exterior vertex quadrant) rounds off to transparent, but with the
+      // square tube it renders near-solid — the glow flows into the corner.
+      const [ox, oy] = ORIGIN[kind];
+      const tx = ox === 0 ? 0 : RIM - 1;
+      const ty = oy === 0 ? 0 : RIM - 1;
+      expect(off[kind][(ty * RIM + tx) * 4 + 3]).toBe(0);
+      expect(on[kind][(ty * RIM + tx) * 4 + 3]).toBeGreaterThan(0);
     }
   });
 
-  it("on: no step > 2/255 across the arc boundary (radial, dark)", () => {
-    // Walk each corner's diagonal ray and measure the alpha step between the
-    // pixels straddling the arc (tIn = 0). The fill equals the centerline value
-    // at |tIn| = 0 by construction (C0), with vanishing slope on both sides
-    // (C1), so the crossing must be seamless.
-    const on = darkGolden({ geometry: { cornerFill: true } });
-    let worst = 0;
+  it("on: tile boundaries meet both adjacent strips within 3/255 (bands 34/76/120, dark)", () => {
+    // Each corner tile abuts a horizontal strip (top/bottom) across its vertical
+    // seam and a vertical strip (left/right) across its horizontal seam. In fill
+    // mode the interior L-path metric min(ax, ay) is EXACTLY the perpendicular
+    // depth the strips use, and the arc-sample endpoints match the strips' arc
+    // position, so both seams (screen edge → deepest interior) stay continuous.
+    for (const band of [34, 76, 120]) {
+      const on = fillGolden(band);
+      let worst = 0;
+      for (const kind of CORNERS) {
+        const [ox, oy] = ORIGIN[kind];
+        const onLeft = ox === 0;   // tile on the left half → horiz strip to the right
+        const onTop = oy === 0;    // tile on the top half → vert strip below
+        const tileGx = onLeft ? ox + RIM - 1 : ox;
+        const stripGx = onLeft ? ox + RIM : ox - 1;
+        for (let gy = oy; gy < oy + RIM; gy++)
+          worst = Math.max(worst, Math.abs(alphaG(on, tileGx, gy, band) - alphaG(on, stripGx, gy, band)));
+        const tileGy = onTop ? oy + RIM - 1 : oy;
+        const stripGy = onTop ? oy + RIM : oy - 1;
+        for (let gx = ox; gx < ox + RIM; gx++)
+          worst = Math.max(worst, Math.abs(alphaG(on, gx, tileGy, band) - alphaG(on, gx, stripGy, band)));
+      }
+      expect(worst).toBeLessThanOrEqual(3);
+    }
+  });
+
+  it("on: the diagonal is seamless — no discontinuity, mirror asymmetry ≤ 6/255 (bands 34/76/120, dark)", () => {
+    // The medial-axis diagonal (ax == ay) is where the nearest centerline is
+    // ambiguous. The angular arc-sample parameterization is CONTINUOUS across it
+    // (it converges to the arc-midpoint profile on the diagonal), so there is no
+    // step. Two checks: (1) reflected pixels at EQUAL tIn (swap ax↔ay) differ
+    // only by the tube's own hue transition — a slope, not a jump; (2) the max
+    // adjacent-pixel step among pairs STRADDLING the diagonal is no larger than
+    // among all interior pairs, i.e. the diagonal adds no discontinuity (both are
+    // just the steep radial core gradient).
+    for (const band of [34, 76, 120]) {
+      const on = fillGolden(band);
+      let mirrorMax = 0, straddleMax = 0, generalMax = 0;
+      for (const kind of CORNERS) {
+        for (let ly = 0; ly < RIM; ly++) for (let lx = 0; lx < RIM; lx++) {
+          const [ax, ay] = axay(kind, lx, ly);
+          if (Math.min(ax, ay) <= 0.5) continue; // interior, off the centerline
+          // (1) equal-tIn reflection asymmetry, restricted to pixels near the
+          // diagonal (the crossing region).
+          if (Math.abs(ax - ay) <= 1.5) {
+            const [mx, my] = mirror(kind, lx, ly);
+            if (mx !== lx || my !== ly)
+              mirrorMax = Math.max(mirrorMax, Math.abs(aTile(on, kind, lx, ly) - aTile(on, kind, mx, my)));
+          }
+          // (2) adjacent-step comparison: straddling the diagonal vs all pairs.
+          for (const [nx, ny] of [[lx + 1, ly], [lx, ly + 1]] as const) {
+            if (nx >= RIM || ny >= RIM) continue;
+            const [ax1, ay1] = axay(kind, nx, ny);
+            if (Math.min(ax1, ay1) <= 0.5) continue;
+            const step = Math.abs(aTile(on, kind, lx, ly) - aTile(on, kind, nx, ny));
+            generalMax = Math.max(generalMax, step);
+            if (Math.sign(ax - ay) !== Math.sign(ax1 - ay1)) straddleMax = Math.max(straddleMax, step);
+          }
+        }
+      }
+      expect(mirrorMax).toBeLessThanOrEqual(6);
+      // No extra step at the diagonal: straddling pairs jump no more than the
+      // worst interior pair anywhere (the radial core gradient), so the diagonal
+      // is not a visible seam.
+      expect(straddleMax).toBeLessThanOrEqual(generalMax);
+    }
+  });
+
+  it("on: exterior vertex renders near-solid, matching the straights' outward margin (dark)", () => {
+    // The exterior vertex quadrant (both ax, ay < 0 → tIn = −hypot) keeps the
+    // flat centerline value (t = 0, no feather), so it renders near-solid — the
+    // same way a straight's outward margin (also t = 0, feather ≡ 1) reads. Also
+    // asserts every filled corner buffer stays finite and never over-opaque.
+    const on = fillGolden(76);
+    // Straight outward margin: the top strip's shallowest row (gy = 0, tIn=-2.5).
+    const margin: number[] = [];
+    for (let gx = RIM; gx < RIM + 60; gx++) margin.push(alphaG(on, gx, 0, 76));
+    const marginVal = margin.reduce((a, b) => a + b, 0) / margin.length;
+    let vMin = 255, vMax = 0;
     for (const kind of CORNERS) {
-      const buf = on[kind];
-      for (let k = 1; k < RIM; k++) {
-        const [x0, y0] = diagPix(kind, k - 1);
-        const [x1, y1] = diagPix(kind, k);
-        const t0 = tInAt(kind, x0, y0);
-        const t1 = tInAt(kind, x1, y1);
-        if ((t0 > 0) !== (t1 > 0)) {
-          worst = Math.max(
-            worst,
-            Math.abs(buf[(y0 * RIM + x0) * 4 + 3] - buf[(y1 * RIM + x1) * 4 + 3]),
-          );
+      expect(on[kind].every((v) => Number.isFinite(v) && v <= 255)).toBe(true);
+      for (let ly = 0; ly < RIM; ly++) for (let lx = 0; lx < RIM; lx++) {
+        const [ax, ay] = axay(kind, lx, ly);
+        if (ax < 0 && ay < 0) {
+          const v = aTile(on, kind, lx, ly);
+          vMin = Math.min(vMin, v); vMax = Math.max(vMax, v);
         }
       }
     }
-    expect(worst).toBeLessThanOrEqual(2);
+    expect(vMin).toBeGreaterThan(0); // genuinely near-solid, not transparent
+    expect(Math.abs(vMin - marginVal)).toBeLessThanOrEqual(2);
+    expect(Math.abs(vMax - marginVal)).toBeLessThanOrEqual(2);
   });
 
-  it("on: radial falloff outward to the corner tip is monotone non-increasing (dark)", () => {
-    // From the arc (tIn = 0) outward to the screen-corner tip, the Gaussian
-    // continuation only decays — allow a 1/255 slack for the ±0.5-LSB dither.
-    const on = darkGolden({ geometry: { cornerFill: true } });
-    for (const kind of CORNERS) {
-      const buf = on[kind];
-      let prev: number | null = null;
-      // k = RIM-1 (tip) → 0 (center): the outward region is the tIn < 0 span,
-      // walked from the arc toward the tip means increasing radial distance =
-      // decreasing k while tIn < 0. Collect that span then check monotonicity.
-      // diagPix k ascends from the arc center to the tip, so the tIn < 0 span
-      // is collected in arc→tip order (increasing radial distance) — it must be
-      // non-increasing along that direction.
-      const outward: number[] = [];
-      for (let k = 0; k < RIM; k++) {
-        const [x, y] = diagPix(kind, k);
-        if (tInAt(kind, x, y) < 0) outward.push(buf[(y * RIM + x) * 4 + 3]);
+  it("on: the core line runs continuously through the corner — no dip > 3/255 (dark)", () => {
+    // The core line lives at the centerline (tIn ≈ 0.5). In fill mode it runs
+    // straight along each edge into the 90° corner (tIn stays ≈ 0.5 through the
+    // vertex junction), so the near-centerline alpha must not dip at the corner
+    // relative to a mid-edge strip column. Collect the tile's near-centerline
+    // pixels (both L arms) and the top strip's centerline, and bound the spread.
+    const on = fillGolden(76);
+    const core: number[] = [];
+    for (const kind of CORNERS)
+      for (let ly = 0; ly < RIM; ly++) for (let lx = 0; lx < RIM; lx++) {
+        const [ax, ay] = axay(kind, lx, ly);
+        if (Math.abs(Math.min(ax, ay) - 0.5) < 1e-6) core.push(aTile(on, kind, lx, ly));
       }
-      for (const v of outward) {
-        if (prev !== null) expect(v).toBeLessThanOrEqual(prev + 1);
-        prev = v;
-      }
-    }
-  });
-
-  it("on: meets the straights within 2/255 at the screen edge (tangency)", () => {
-    // At the top screen edge (y = 0), the TL tile's rightmost column (x = RIM-1)
-    // abuts the top strip's leftmost column (x = RIM). The strip keeps the flat
-    // near-solid centerline there and the fill's Gaussian is ≈1 that shallow, so
-    // the two must agree.
-    const on = darkGolden({ geometry: { cornerFill: true } });
-    const topW = 800 - 2 * RIM;
-    const tileEdge = on[TILE.TL][(0 * RIM + (RIM - 1)) * 4 + 3];
-    const stripEdge = on[TILE.top][(0 * topW + 0) * 4 + 3];
-    expect(tileEdge).toBeGreaterThan(0);
-    expect(Math.abs(tileEdge - stripEdge)).toBeLessThanOrEqual(2);
+    for (let i = 0; i < 40; i++) core.push(alphaG(on, RIM + i, INSET, 76)); // strip centerline (tIn ≈ 0.5)
+    expect(core.length).toBeGreaterThan(0);
+    expect(Math.max(...core) - Math.min(...core)).toBeLessThanOrEqual(3);
   });
 
   it("is togglable live via updateOptions (matches a fresh cornerFill instance)", () => {
     const engine = mk({ seed: 42, geometry: { cornerFill: false } });
     engine.step(16.7);
-    // TL screen-corner tip is buffer pixel (0, 0) = diagPix(TL, RIM-1).
+    // TL screen-corner tip is buffer pixel (0, 0).
     const tipIdx = 3;
     const tipBefore = captureBuffers(engine)[TILE.TL][tipIdx];
     expect(tipBefore).toBe(0); // rounded off before the toggle
@@ -644,14 +723,6 @@ describe("corner fill (opt-in)", () => {
     expect(bytesEqual(captureFrame(engine), captureFrame(fresh))).toBe(true);
     const tipAfter = captureBuffers(engine)[TILE.TL][tipIdx];
     expect(tipAfter).toBeGreaterThan(0); // corner now filled
-  });
-
-  it("keeps filled corner pixels NaN-free and never over-opaque (dark)", () => {
-    const on = darkGolden({ geometry: { cornerFill: true } });
-    for (const kind of CORNERS) {
-      expect(on[kind].every((v) => Number.isFinite(v))).toBe(true);
-      expect(on[kind].every((v) => v <= 255)).toBe(true);
-    }
   });
 });
 
