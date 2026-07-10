@@ -179,7 +179,7 @@ const ja: Dict = {
   usageReadme: "完全な API は README をご覧ください。",
   readmeLink: "README",
 
-  madeBy: "制作: Takuya Jodai",
+  madeBy: "Made by Takuya Jodai",
   repo: "GitHub リポジトリ",
 };
 
