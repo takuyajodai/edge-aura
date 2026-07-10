@@ -132,6 +132,18 @@ export interface EdgeAuraGeometryOptions {
   innerSoftBase?: number;
   innerSoftVar?: number;
   innerSigmaMax?: number;
+  /**
+   * Fill the square viewport corners with a smooth radial continuation of the
+   * glow instead of rounding off (default false). With the default rounding,
+   * the corner-exterior region (pixels past the arc, out to the physical square
+   * corner) fades to transparent via the outward feather, giving a beam-style
+   * rounded ring. Set true to instead continue the glow into that region: alpha
+   * falls off from the centerline value with a gentle radial Gaussian (widened
+   * sigma tied to the corner scale), C0/C1-continuous across the arc — no
+   * boundary at the arc or the screen edges — so the corners stay luminous while
+   * still breathing with the field. Togglable live via updateOptions.
+   */
+  cornerFill?: boolean;
 }
 
 export interface EdgeAuraPaletteOptions {
@@ -349,6 +361,7 @@ export const EDGE_AURA_DEFAULTS = {
     innerSoftBase: 1.25,
     innerSoftVar: 0.45,
     innerSigmaMax: 17,
+    cornerFill: false,
   },
   palette: {
     stops: EDGE_AURA_PALETTES.opal,
@@ -439,6 +452,17 @@ function oklabToSrgb255(L: number, a: number, b: number): { r: number; g: number
 // Palette LUT — 256-entry RGB array built per instance from the stops.
 // ---------------------------------------------------------------------------
 const LUT_SIZE = 256;
+
+// Dark-mode alpha response LUT resolution (I2). The response curve
+// pow(coverage, gamma) is sampled at DARK_ALPHA_LUT_SIZE input points and
+// indexed by (aGeom * DARK_ALPHA_LUT_MAX) | 0 — the INPUT coverage is
+// quantized to this many levels BEFORE the pow, not to 8 bits. 4096 makes the
+// smallest nonzero dark alpha pow(1/4095, 0.55)·… ≈ 2.6/255 (vs ~12/255 at
+// 256), so the dark inner-edge terminus no longer ends in an ~11/255 stippled
+// cliff; the output ordered dither then dissolves what remains. Cost is one
+// lookup (unchanged) and 16 KB per instance.
+const DARK_ALPHA_LUT_SIZE = 4096;
+const DARK_ALPHA_LUT_MAX = DARK_ALPHA_LUT_SIZE - 1;
 
 // `interpolation` selects the stop-to-stop lerp space. "srgb" is the original
 // raw-channel lerp (byte-identical to prior versions); "oklab" lerps L/a/b of
@@ -885,6 +909,13 @@ export function createAuraEngine(
   let CQ = 0, ARC = 0;
   let CORE_SIGMA_BASE = 0, CORE_SIGMA_VAR = 0;
   let INNER_SOFT_BASE = 0, INNER_SOFT_VAR = 0, INNER_SIGMA_MAX = 0;
+  // Corner fill (opt-in): when true the corner-exterior region continues the
+  // glow radially instead of feathering to transparent. FILL_DEN_MIN is the
+  // 2σ² floor for that radial Gaussian — 2·(0.75·CR)² — so the fill sigma is
+  // max(outward bloom sigma, 0.75·CR): wide enough that the physical square
+  // corner keeps meaningful luminance. Both derived in deriveGeometry.
+  let CORNER_FILL = false;
+  let FILL_DEN_MIN = 0;
 
   // Bloom depth profile scales with band so the falloff stays SELF-SIMILAR:
   // the sb sigma family (base, noise range, energy contributions, clamp bounds)
@@ -955,6 +986,9 @@ export function createAuraEngine(
     INNER_SOFT_BASE = geo.innerSoftBase;
     INNER_SOFT_VAR = geo.innerSoftVar;
     INNER_SIGMA_MAX = clampOpt(geo.innerSigmaMax, 1, DEF_GEO.innerSigmaMax);
+    CORNER_FILL = geo.cornerFill === true;
+    // 2σ² floor for the corner-fill radial Gaussian: σ ≥ 0.75·CR (see the lets).
+    FILL_DEN_MIN = 2 * (0.75 * CR) * (0.75 * CR);
 
     // Fold BLOOM_SCALE into every sb-pipeline constant (see the block comment
     // above). Only the BLOOM DEPTH family scales: core sigma, the tangential
@@ -1015,7 +1049,10 @@ export function createAuraEngine(
     // because RIM / CR / INSET / ns can all change on a geometry re-derive.
     const rim2 = RIM * RIM;
     const nsSpan = ns - 1;
-    const skipBelow = -(INSET + CORNER_FEATHER_PX);
+    // When filling, cover the WHOLE RIM×RIM tile out to the physical square
+    // corner (tIn down to CR − RIM·√2 < 0), so no exterior pixel is skipped;
+    // otherwise stop one feather past INSET, where the rounded ring dies.
+    const skipBelow = CORNER_FILL ? -Infinity : -(INSET + CORNER_FEATHER_PX);
     for (let kind = 0; kind < 4; kind++) {
       const lcx = CORNER_X_NEG[kind] ? RIM : 0;
       const lcy = CORNER_Y_NEG[kind] ? RIM : 0;
@@ -1102,11 +1139,13 @@ export function createAuraEngine(
   let DARK_CHROMA: number = EDGE_AURA_DEFAULTS.palette.darkChroma;
   let BLEND_MODE: "source-over" | "screen" | "plus-lighter" = "source-over";
 
-  // Dark-mode alpha response LUT: darkAlphaLut[i] = pow(i/255, gamma), indexed
-  // by the geometric coverage byte. Refilled by derivePalette (gamma may change
-  // on update); read only on dark backgrounds — the light hot path never
-  // touches it, and gamma 1 makes it the identity.
-  const darkAlphaLut = new Float32Array(256);
+  // Dark-mode alpha response LUT: darkAlphaLut[i] = pow(i/DARK_ALPHA_LUT_MAX,
+  // gamma), indexed by (aGeom * DARK_ALPHA_LUT_MAX) | 0 — the coverage is
+  // quantized to DARK_ALPHA_LUT_SIZE input levels BEFORE the pow, so the faint
+  // dark terminus resolves finely (see the const's note). Refilled by
+  // derivePalette (gamma may change on update); read only on dark backgrounds —
+  // the light hot path never touches it, and gamma 1 makes it the identity.
+  const darkAlphaLut = new Float32Array(DARK_ALPHA_LUT_SIZE);
 
   const derivePalette = () => {
     DARK_BG = pal.background === "dark";
@@ -1138,7 +1177,9 @@ export function createAuraEngine(
       pal.blendMode === "screen" || pal.blendMode === "plus-lighter"
         ? pal.blendMode
         : "source-over";
-    for (let i = 0; i < 256; i++) darkAlphaLut[i] = Math.pow(i / 255, DARK_ALPHA_GAMMA);
+    for (let i = 0; i < DARK_ALPHA_LUT_SIZE; i++) {
+      darkAlphaLut[i] = Math.pow(i / DARK_ALPHA_LUT_MAX, DARK_ALPHA_GAMMA);
+    }
   };
 
   deriveGeometry();
@@ -1621,6 +1662,11 @@ export function createAuraEngine(
     }
   };
 
+  // True only while drawCorner writes a corner TILE's pixels; gates the
+  // opt-in corner fill (below) so it never touches strip pixels. Strips leave
+  // it false, so their outward region (|tIn| ≤ INSET − 0.5) is byte-identical.
+  let inCornerTile = false;
+
   // Shared per-pixel neon profile: core + bloom Gaussians from np, scaled by
   // frame intensity, core whitened toward 255.  tIn is the signed distance
   // to the centerline with INWARD POSITIVE on every segment (straights:
@@ -1636,6 +1682,16 @@ export function createAuraEngine(
   // there and those pixels are byte-identical to the pre-rounding renderer;
   // only corner tiles, whose square region extends past INSET, round off —
   // ending ~INSET px beyond the arc, tangent to both screen edges.
+  //
+  // CORNER FILL (opt-in, corner tiles only): when CORNER_FILL is on, the
+  // corner-exterior region (tIn < 0) instead continues the glow radially —
+  // (Ac,Ab) scaled by a Gaussian gFill = exp(−tIn²/max(bloomDenOut, FILL_DEN_MIN))
+  // in the radial distance |tIn|. gFill(0) = 1, so at the arc the fill equals
+  // the flat centerline value the inward side lands on (C0), and both sides'
+  // slopes vanish at tIn = 0 (C1) — no boundary at the arc. The widened sigma
+  // (≥ 0.75·CR) keeps the physical square corner luminous. The outward feather
+  // is disabled here (mutually exclusive); the core term still whitens, fading
+  // with gFill. Straights never enter this branch (inCornerTile is false).
   //
   // On dark backgrounds the geometric coverage is additionally pushed through
   // the darkAlphaLut response curve (pow(coverage, darkAlphaGamma)) before
@@ -1657,44 +1713,57 @@ export function createAuraEngine(
     // the majority of the loop, so hiding this load is a real win. Pure reorder,
     // byte-identical. (px & 7)/(py & 7) index the continuous 8×8 lattice.
     const dOff = BAYER8[(px & 7) + ((py & 7) << 3)];
-    const t = tIn < 0 ? 0 : tIn;
-    const tt = t * t;
-    // Core is negligible past tt ≈ 40 (exp(−40/5.8) < 0.001) — skipping the
-    // exp matters because the long inner tail makes deep pixels the
-    // majority of the loop.
-    const core = tt < 40 ? np.Ac * Math.exp(-tt / np.coreDen) : 0;
-    let bloom: number;
-    if (t > 0) {
-      // Long-tailed rational falloff: (1 + t²/2σ²)^−1.5, computed as
-      // u·√u (no Math.pow). The inner window (G2a) eases it to exactly 0 at
-      // BAND depth so the buffer edge never shows as a line. It is
-      // smoothstep(1 − x⁴): monotone, 1 at x=0, and — unlike the previous
-      // bare 1 − x⁴ (slope −4 at x=1) — it lands on 0 with ZERO SLOPE (C1),
-      // so the inner face dissolves without a mach-band kink. Cost: one extra
-      // smoothstep (3 mul), no pow. It stays fuller than (1 − x⁴)² through the
-      // 0.5–0.85 mid-band (e.g. x=0.7 → 0.855 vs 0.577), preserving the tail's
-      // body for thin rings, and only dives faster in the last few px.
-      const u = 1 + tt / np.bloomDenIn;
-      const x = (t + INSET) / BAND;
-      const x2 = x * x;
-      const w4 = 1 - x2 * x2;                    // 1 − x⁴
-      const win = w4 > 0 ? w4 * w4 * (3 - 2 * w4) : 0; // smoothstep(1 − x⁴)
-      bloom = win > 0 ? (np.Ab * win) / (u * Math.sqrt(u)) : 0;
-    } else {
-      bloom = np.Ab * Math.exp(-tt / np.bloomDenOut);
-    }
-    // Outward feather: flat to INSET px, then a CORNER_FEATHER_PX fade to 0.
-    // Exactly 1 for every straight-edge pixel (|tIn| ≤ INSET − 0.5).
+    let core: number, bloom: number;
     let outwardFade = 1;
-    if (tIn < 0) {
-      const aOut = -tIn;
-      if (aOut > INSET) {
-        outwardFade = 1 - smoothstep01((aOut - INSET) / CORNER_FEATHER_PX);
+    if (CORNER_FILL && inCornerTile && tIn < 0) {
+      // Corner fill: smooth radial continuation of the centerline profile out
+      // into the square-corner exterior. gFill is a Gaussian in the radial
+      // distance |tIn| with a widened sigma (2σ² = max(bloomDenOut, FILL_DEN_MIN),
+      // i.e. σ = max(outward bloom σ, 0.75·CR)); gFill(0) = 1 so the arc value
+      // matches the inward side (C0/C1), and it decays gently so the physical
+      // corner stays luminous. The feather is disabled in this region.
+      const fillDen = np.bloomDenOut > FILL_DEN_MIN ? np.bloomDenOut : FILL_DEN_MIN;
+      const gFill = Math.exp(-(tIn * tIn) / fillDen);
+      core = np.Ac * gFill;
+      bloom = np.Ab * gFill;
+    } else {
+      const t = tIn < 0 ? 0 : tIn;
+      const tt = t * t;
+      // Core is negligible past tt ≈ 40 (exp(−40/5.8) < 0.001) — skipping the
+      // exp matters because the long inner tail makes deep pixels the
+      // majority of the loop.
+      core = tt < 40 ? np.Ac * Math.exp(-tt / np.coreDen) : 0;
+      if (t > 0) {
+        // Long-tailed rational falloff: (1 + t²/2σ²)^−1.5, computed as
+        // u·√u (no Math.pow). The inner window (G2a) eases it to exactly 0 at
+        // BAND depth so the buffer edge never shows as a line. It is
+        // smoothstep(1 − x⁴): monotone, 1 at x=0, and — unlike the previous
+        // bare 1 − x⁴ (slope −4 at x=1) — it lands on 0 with ZERO SLOPE (C1),
+        // so the inner face dissolves without a mach-band kink. Cost: one extra
+        // smoothstep (3 mul), no pow. It stays fuller than (1 − x⁴)² through the
+        // 0.5–0.85 mid-band (e.g. x=0.7 → 0.855 vs 0.577), preserving the tail's
+        // body for thin rings, and only dives faster in the last few px.
+        const u = 1 + tt / np.bloomDenIn;
+        const x = (t + INSET) / BAND;
+        const x2 = x * x;
+        const w4 = 1 - x2 * x2;                    // 1 − x⁴
+        const win = w4 > 0 ? w4 * w4 * (3 - 2 * w4) : 0; // smoothstep(1 − x⁴)
+        bloom = win > 0 ? (np.Ab * win) / (u * Math.sqrt(u)) : 0;
+      } else {
+        bloom = np.Ab * Math.exp(-tt / np.bloomDenOut);
+      }
+      // Outward feather: flat to INSET px, then a CORNER_FEATHER_PX fade to 0.
+      // Exactly 1 for every straight-edge pixel (|tIn| ≤ INSET − 0.5).
+      if (tIn < 0) {
+        const aOut = -tIn;
+        if (aOut > INSET) {
+          outwardFade = 1 - smoothstep01((aOut - INSET) / CORNER_FEATHER_PX);
+        }
       }
     }
     const aGeom = Math.min(1, core + bloom);
     const a = DARK_BG
-      ? darkAlphaLut[(aGeom * 255) | 0] * frameIntensity * np.env * outwardFade
+      ? darkAlphaLut[(aGeom * DARK_ALPHA_LUT_MAX) | 0] * frameIntensity * np.env * outwardFade
       : aGeom * frameIntensity * np.env * outwardFade;
     if (a >= ALPHA_EPS) {
       const wm = CORE_WHITEN * core;
@@ -1972,6 +2041,10 @@ export function createAuraEngine(
     const jMap = cornerJMap[kind];
     const tInMap = cornerTInMap[kind];
     let li = 0;
+    // Enable the corner-fill branch of writeNeonPixel for this tile's exterior
+    // pixels (no-op unless CORNER_FILL). Strips never set this, so they are
+    // untouched.
+    inCornerTile = true;
     for (let ly = 0; ly < RIM; ly++) {
       const py = py0 + ly;
       for (let lx = 0; lx < RIM; lx++, li++) {
@@ -1984,6 +2057,7 @@ export function createAuraEngine(
         writeNeonPixel(data, li << 2, tInMap[li], px0 + lx, py);
       }
     }
+    inCornerTile = false;
     buf.cx.putImageData(buf.img, 0, 0);
   };
 

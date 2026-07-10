@@ -423,9 +423,17 @@ describe("dark pixel snapshot", () => {
    * Regenerated again with the light snapshot for the corner arc-sample perf
    * pass (see the light note): only corner-interior pixels shift by the sub-LSB
    * arc-sample quantization; the rest of the pipeline is a byte-identical reorder.
+   *
+   * Regenerated for v0.4 item 2 (dark terminus cliff): the darkAlphaLut is now
+   * indexed at 4096 input levels instead of 256 — the coverage is quantized
+   * finely BEFORE pow(gamma), so the smallest nonzero dark alpha drops from
+   * ~12/255 to ~2.6/255 and the inner-edge terminus no longer ends in an
+   * ~11/255 stippled cliff. DARK-ONLY: the light snapshot is unchanged. The
+   * response CURVE is identical (same pow), only its input resolution is finer,
+   * so mid-tail values move ≤ 1/255 and only the faint terminus visibly shifts.
    */
   const DARK_SNAPSHOT_SHA256 =
-    "c2efaa8cf3de4c8c0d531f0b6decd44b0c71fcaf6e435ee0eddbd92d4b10284c";
+    "aaed867482b51ba7381e82129dacf6b99b221a91024ab8206de20c3bbe6a4243";
 
   it("matches the golden hash for the fixed dark 30-frame sequence", () => {
     const engine = mk({ seed: 42, palette: { background: "dark" } });
@@ -491,6 +499,158 @@ describe("corner rounding", () => {
     for (const buf of cornerTiles(engine)) {
       expect(buf.every((v) => Number.isFinite(v))).toBe(true);
       expect(buf.every((v) => v <= 255)).toBe(true);
+    }
+  });
+});
+
+describe("corner fill (opt-in)", () => {
+  // Local arc-center of each corner tile (bufferX, bufferY), TL/TR/BR/BL order.
+  const CENTERS: Record<number, [number, number]> = {
+    [TILE.TL]: [RIM, RIM],
+    [TILE.TR]: [0, RIM],
+    [TILE.BR]: [0, 0],
+    [TILE.BL]: [RIM, 0],
+  };
+
+  // Pixel (bufX, bufY) `k` steps along the tile's 45° diagonal, k = 0 nearest
+  // the arc center, k = RIM-1 at the physical screen-corner tip. This ray runs
+  // exactly through pixel centers, so radial steps along it are uncontaminated
+  // by tangential (along-arc) profile variation.
+  const diagPix = (kind: number, k: number): [number, number] => {
+    const [cx, cy] = CENTERS[kind];
+    return [cx === 0 ? k : RIM - 1 - k, cy === 0 ? k : RIM - 1 - k];
+  };
+  const tInAt = (kind: number, x: number, y: number): number => {
+    const [cx, cy] = CENTERS[kind];
+    return CR - Math.hypot(x + 0.5 - cx, y + 0.5 - cy);
+  };
+  const CORNERS = [TILE.TL, TILE.TR, TILE.BR, TILE.BL];
+
+  // The fixed dark 30-frame golden sequence (tap + key), returning the 8 tiles.
+  const darkGolden = (options?: EdgeAuraOptions): Uint8ClampedArray[] => {
+    const engine = mk({ seed: 42, palette: { background: "dark" }, ...options });
+    let bufs: Uint8ClampedArray[] = [];
+    for (let frame = 0; frame < 30; frame++) {
+      engine.step(16.7);
+      if (frame === 10) engine.tap({ x: 200, y: 300 });
+      if (frame === 15) engine.key(0.5);
+      bufs = captureBuffers(engine);
+    }
+    return bufs;
+  };
+
+  it("default off is byte-identical to omitting the option (light and dark)", () => {
+    for (const bg of ["light", "dark"] as const) {
+      const omit = mk({ seed: 42, palette: { background: bg } });
+      const off = mk({ seed: 42, palette: { background: bg }, geometry: { cornerFill: false } });
+      omit.step(16.7);
+      off.step(16.7);
+      expect(bytesEqual(captureFrame(omit), captureFrame(off))).toBe(true);
+    }
+  });
+
+  it("on: fills the square viewport-corner exterior where off leaves it transparent", () => {
+    const off = darkGolden();
+    const on = darkGolden({ geometry: { cornerFill: true } });
+    for (const kind of CORNERS) {
+      // The physical screen-corner tip pixel (farthest from the arc center) is
+      // transparent when rounding off, luminous when filling.
+      const [tx, ty] = diagPix(kind, RIM - 1);
+      const tipOff = off[kind][(ty * RIM + tx) * 4 + 3];
+      const tipOn = on[kind][(ty * RIM + tx) * 4 + 3];
+      expect(tipOff).toBe(0);
+      expect(tipOn).toBeGreaterThan(0);
+    }
+  });
+
+  it("on: no step > 2/255 across the arc boundary (radial, dark)", () => {
+    // Walk each corner's diagonal ray and measure the alpha step between the
+    // pixels straddling the arc (tIn = 0). The fill equals the centerline value
+    // at |tIn| = 0 by construction (C0), with vanishing slope on both sides
+    // (C1), so the crossing must be seamless.
+    const on = darkGolden({ geometry: { cornerFill: true } });
+    let worst = 0;
+    for (const kind of CORNERS) {
+      const buf = on[kind];
+      for (let k = 1; k < RIM; k++) {
+        const [x0, y0] = diagPix(kind, k - 1);
+        const [x1, y1] = diagPix(kind, k);
+        const t0 = tInAt(kind, x0, y0);
+        const t1 = tInAt(kind, x1, y1);
+        if ((t0 > 0) !== (t1 > 0)) {
+          worst = Math.max(
+            worst,
+            Math.abs(buf[(y0 * RIM + x0) * 4 + 3] - buf[(y1 * RIM + x1) * 4 + 3]),
+          );
+        }
+      }
+    }
+    expect(worst).toBeLessThanOrEqual(2);
+  });
+
+  it("on: radial falloff outward to the corner tip is monotone non-increasing (dark)", () => {
+    // From the arc (tIn = 0) outward to the screen-corner tip, the Gaussian
+    // continuation only decays — allow a 1/255 slack for the ±0.5-LSB dither.
+    const on = darkGolden({ geometry: { cornerFill: true } });
+    for (const kind of CORNERS) {
+      const buf = on[kind];
+      let prev: number | null = null;
+      // k = RIM-1 (tip) → 0 (center): the outward region is the tIn < 0 span,
+      // walked from the arc toward the tip means increasing radial distance =
+      // decreasing k while tIn < 0. Collect that span then check monotonicity.
+      // diagPix k ascends from the arc center to the tip, so the tIn < 0 span
+      // is collected in arc→tip order (increasing radial distance) — it must be
+      // non-increasing along that direction.
+      const outward: number[] = [];
+      for (let k = 0; k < RIM; k++) {
+        const [x, y] = diagPix(kind, k);
+        if (tInAt(kind, x, y) < 0) outward.push(buf[(y * RIM + x) * 4 + 3]);
+      }
+      for (const v of outward) {
+        if (prev !== null) expect(v).toBeLessThanOrEqual(prev + 1);
+        prev = v;
+      }
+    }
+  });
+
+  it("on: meets the straights within 2/255 at the screen edge (tangency)", () => {
+    // At the top screen edge (y = 0), the TL tile's rightmost column (x = RIM-1)
+    // abuts the top strip's leftmost column (x = RIM). The strip keeps the flat
+    // near-solid centerline there and the fill's Gaussian is ≈1 that shallow, so
+    // the two must agree.
+    const on = darkGolden({ geometry: { cornerFill: true } });
+    const topW = 800 - 2 * RIM;
+    const tileEdge = on[TILE.TL][(0 * RIM + (RIM - 1)) * 4 + 3];
+    const stripEdge = on[TILE.top][(0 * topW + 0) * 4 + 3];
+    expect(tileEdge).toBeGreaterThan(0);
+    expect(Math.abs(tileEdge - stripEdge)).toBeLessThanOrEqual(2);
+  });
+
+  it("is togglable live via updateOptions (matches a fresh cornerFill instance)", () => {
+    const engine = mk({ seed: 42, geometry: { cornerFill: false } });
+    engine.step(16.7);
+    // TL screen-corner tip is buffer pixel (0, 0) = diagPix(TL, RIM-1).
+    const tipIdx = 3;
+    const tipBefore = captureBuffers(engine)[TILE.TL][tipIdx];
+    expect(tipBefore).toBe(0); // rounded off before the toggle
+
+    engine.updateOptions({ geometry: { cornerFill: true } });
+    // Equals a fresh instance created with cornerFill on, stepped the same.
+    const fresh = mk({ seed: 42, geometry: { cornerFill: true } });
+    // engine already stepped once; step both to the same elapsed and compare.
+    fresh.step(16.7);
+    engine.step(16.7);
+    fresh.step(16.7);
+    expect(bytesEqual(captureFrame(engine), captureFrame(fresh))).toBe(true);
+    const tipAfter = captureBuffers(engine)[TILE.TL][tipIdx];
+    expect(tipAfter).toBeGreaterThan(0); // corner now filled
+  });
+
+  it("keeps filled corner pixels NaN-free and never over-opaque (dark)", () => {
+    const on = darkGolden({ geometry: { cornerFill: true } });
+    for (const kind of CORNERS) {
+      expect(on[kind].every((v) => Number.isFinite(v))).toBe(true);
+      expect(on[kind].every((v) => v <= 255)).toBe(true);
     }
   });
 });
@@ -789,6 +949,69 @@ describe("dark alpha response (I3)", () => {
       checked++;
     }
     expect(checked).toBeGreaterThan(0); // the mid-bloom band was actually sampled
+  });
+});
+
+describe("dark inner-edge terminus (I2: high-res darkAlphaLut input)", () => {
+  // The dark alpha response LUT is indexed by (aGeom * DARK_ALPHA_LUT_MAX) | 0.
+  // At the OLD 256-input resolution the smallest nonzero dark alpha was
+  // LUT[1] = pow(1/255, 0.55)·0.9·255 ≈ 11/255, so the faint inner-edge tail
+  // ended in an ~11/255 stippled cliff (no inner window can fix an input-
+  // quantization step). At 4096 the smallest nonzero drops to ≈ 2.6/255 and the
+  // deep tail becomes a smooth ramp the output dither dissolves.
+  const darkGolden = (): Uint8ClampedArray[] => {
+    const engine = mk({ seed: 42, palette: { background: "dark" } });
+    let bufs: Uint8ClampedArray[] = [];
+    for (let frame = 0; frame < 30; frame++) {
+      engine.step(16.7);
+      if (frame === 10) engine.tap({ x: 200, y: 300 });
+      if (frame === 15) engine.key(0.5);
+      bufs = captureBuffers(engine);
+    }
+    return bufs;
+  };
+
+  it("populates dark alpha bytes below the old 11/255 floor (finer input resolution)", () => {
+    // Bytes 2..9 are UNREACHABLE under the old 8-bit input LUT (its smallest
+    // nonzero output rounds to ~11); the 4096-input LUT resolves them, so their
+    // presence is a direct fingerprint of the higher input resolution.
+    const bufs = darkGolden();
+    let lowCount = 0;
+    for (const buf of bufs) {
+      for (let i = 3; i < buf.length; i += 4) {
+        const a = buf[i];
+        if (a >= 2 && a <= 9) lowCount++;
+      }
+    }
+    expect(lowCount).toBeGreaterThan(100);
+  });
+
+  it("caps the natural inner-edge terminus step at ≤ 3/255 (no 11/255 cliff)", () => {
+    // On the top strip, a column that DECAYS to the alpha-epsilon break (its
+    // deepest lit pixel is faint, ≤ 3) terminates naturally rather than being
+    // reach/window-clipped. Across those quiet columns the largest adjacent-
+    // depth step in the last 6 px — including the final drop to 0 — is the
+    // terminus cliff. It must sit at ≤ 3/255, not the old ~11.
+    const bufs = darkGolden();
+    const top = bufs[TILE.top];
+    const topW = 800 - 2 * RIM;
+    let worst = 0;
+    let naturalColumns = 0;
+    for (let col = 30; col < topW - 30; col++) {
+      const alphas: number[] = [];
+      for (let d = 0; d < 76; d++) alphas.push(top[(d * topW + col) * 4 + 3]);
+      let last = -1;
+      for (let d = 75; d >= 0; d--) {
+        if (alphas[d] > 0) { last = d; break; }
+      }
+      if (last < 0 || alphas[last] > 3) continue; // natural terminus only
+      naturalColumns++;
+      for (let d = Math.max(0, last - 5); d <= last; d++) {
+        worst = Math.max(worst, Math.abs(alphas[d] - (alphas[d + 1] ?? 0)));
+      }
+    }
+    expect(naturalColumns).toBeGreaterThan(0); // the regime was actually sampled
+    expect(worst).toBeLessThanOrEqual(3);
   });
 });
 
