@@ -230,6 +230,7 @@ should degrade gracefully on garbage numbers, not crash the host.
 |---|---|---|
 | `inset` | `3` | Centerline inset from the viewport edges (px) |
 | `cornerRadius` | `11` | Rounded-rect corner radius (px); smaller hugs the corner more squarely |
+| `cornerFill` | `false` | Fill the square viewport corners with a smooth radial continuation of the glow instead of rounding off to transparent |
 | `topEdgeFade` | `0` | Fade the composited aura to transparent over the topmost N px — for browsers that tint their window chrome by sampling the page's top rows |
 | `topCornerFade` | `0` | Radial fade around the two top corners over radius N px — for browsers (e.g. Arc) that tint their chrome from the top-corner patches |
 | `band` | `76` | Strip depth (px) — hard end of the inward dissolve (smoothly windowed to 0) |

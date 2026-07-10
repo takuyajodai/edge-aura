@@ -132,6 +132,18 @@ export interface EdgeAuraGeometryOptions {
   innerSoftBase?: number;
   innerSoftVar?: number;
   innerSigmaMax?: number;
+  /**
+   * Fill the square viewport corners with a smooth radial continuation of the
+   * glow instead of rounding off (default false). With the default rounding,
+   * the corner-exterior region (pixels past the arc, out to the physical square
+   * corner) fades to transparent via the outward feather, giving a beam-style
+   * rounded ring. Set true to instead continue the glow into that region: alpha
+   * falls off from the centerline value with a gentle radial Gaussian (widened
+   * sigma tied to the corner scale), C0/C1-continuous across the arc — no
+   * boundary at the arc or the screen edges — so the corners stay luminous while
+   * still breathing with the field. Togglable live via updateOptions.
+   */
+  cornerFill?: boolean;
 }
 
 export interface EdgeAuraPaletteOptions {
@@ -349,6 +361,7 @@ export const EDGE_AURA_DEFAULTS = {
     innerSoftBase: 1.25,
     innerSoftVar: 0.45,
     innerSigmaMax: 17,
+    cornerFill: false,
   },
   palette: {
     stops: EDGE_AURA_PALETTES.opal,
@@ -439,6 +452,17 @@ function oklabToSrgb255(L: number, a: number, b: number): { r: number; g: number
 // Palette LUT — 256-entry RGB array built per instance from the stops.
 // ---------------------------------------------------------------------------
 const LUT_SIZE = 256;
+
+// Dark-mode alpha response LUT resolution (I2). The response curve
+// pow(coverage, gamma) is sampled at DARK_ALPHA_LUT_SIZE input points and
+// indexed by (aGeom * DARK_ALPHA_LUT_MAX) | 0 — the INPUT coverage is
+// quantized to this many levels BEFORE the pow, not to 8 bits. 4096 makes the
+// smallest nonzero dark alpha pow(1/4095, 0.55)·… ≈ 2.6/255 (vs ~12/255 at
+// 256), so the dark inner-edge terminus no longer ends in an ~11/255 stippled
+// cliff; the output ordered dither then dissolves what remains. Cost is one
+// lookup (unchanged) and 16 KB per instance.
+const DARK_ALPHA_LUT_SIZE = 4096;
+const DARK_ALPHA_LUT_MAX = DARK_ALPHA_LUT_SIZE - 1;
 
 // `interpolation` selects the stop-to-stop lerp space. "srgb" is the original
 // raw-channel lerp (byte-identical to prior versions); "oklab" lerps L/a/b of
@@ -572,6 +596,7 @@ function mulberry32(seed: number): () => number {
 }
 
 const HALF_PI = Math.PI / 2;
+const TWO_PI = Math.PI * 2;
 
 // Below this alpha a pixel write is invisible; also the spring threshold
 // under which hotspot Gaussians are skipped entirely.
@@ -591,15 +616,26 @@ const CORNER_FEATHER_PX = 1.5;
 // where the two owning strips meet and must agree; shallower pixels keep the
 // column's own live noise, so the bright core/bloom never freezes into a flat
 // band. See the corner-continuity block in createAuraEngine.
-const CORNER_DEPTH_FADE_PX = 16;
-
-// Column span, adjacent to a corner TILE, over which the depth-crossfade is
-// additionally lifted at SHALLOW depths so the strip meets the tile (which
-// renders wholly on the midpoint profile) without a boundary step — most
-// visible at the TL noise-wrap seam. Only the first few columns are touched;
-// a ~10-column shallow lift is imperceptible. Columns past it keep live noise
-// at shallow depth (only the deep diagonal-cut region freezes).
-const CORNER_TILE_ADJ_COLS = 10;
+//
+// v0.4 note: this blend is NOT concealing a noise-wrap artifact — the G1
+// periodic ring field made the noise flow continuously around the ring and
+// nulled the s = 0 / perimeter wrap seam (the corner TILE now renders that
+// field live per pixel). What remains is a purely GEOMETRIC discontinuity: the
+// arc-position parameterization branches along each 45° corner diagonal (the
+// nearest-centerline point jumps between the two straights, so the two owning
+// strips sample arc positions ~2·depth apart). Measured with this crossfade
+// removed, that ridge reaches 16–31/255 on dark — far over the ≤2/255 seam
+// gate — so this minimal DEEP-only crossfade is kept. It converges the two
+// owning strips at the cut depth and touches nothing shallow.
+//
+// The window is deliberately NARROW (6 px, was 16 pre-v0.4). A wide window
+// started the convergence so shallow that near-corner columns were already
+// half-pulled toward the midpoint at the tile-boundary rows (depth < RIM),
+// stepping ~5/255 against the now-live tile. 6 px confines the pull to just
+// above each column's diagonal cut, so the shallow rows stay live and meet the
+// live tile on the periodic field (tile-boundary step ≤ 3/255) while the
+// diagonal still nulls to ≤ 1/255. See the corner-continuity block.
+const CORNER_DEPTH_FADE_PX = 6;
 
 // ---------------------------------------------------------------------------
 // Internal types
@@ -636,14 +672,64 @@ function easeOutCubic(x: number): number {
   return 1 - u * u * u;
 }
 
-function noise(t: number, p: number): number {
+// Periodic ring noise (G1). `ta` is the temporal argument (the caller folds in
+// each stream's temporal-frequency multiplier); `theta` = 2π·s/perimeter is the
+// ring angle at arc position s. The three octaves take their SPATIAL phase from
+// INTEGER harmonics k1/k2/k3 of θ, so every term completes a whole number of
+// cycles around the ring and the field is byte-for-byte identical at the
+// s = 0 / s = perimeter closure — the noise-wrap seam is structurally zero.
+// Amplitude structure (0.5 + 0.27/0.18/0.05) and the constant per-stream phase
+// offsets (phase, 1.71·phase, 0.39·phase) are unchanged from the pre-v0.4
+// quasi-periodic `noise(ta, s·freq + phase)`; only the s-dependent part moved
+// from `s·freq` to integer `k·θ` (k ≈ freq·perimeter/2π — see deriveGeometry).
+function ringNoise(
+  ta: number, theta: number, k1: number, k2: number, k3: number, phase: number,
+): number {
   return (
     0.5 +
-    0.27 * Math.sin(0.9  * t + p) +
-    0.18 * Math.sin(2.33 * t + p * 1.71) +
-    0.05 * Math.sin(5.11 * t + p * 0.39)
+    0.27 * Math.sin(0.9  * ta + k1 * theta + phase) +
+    0.18 * Math.sin(2.33 * ta + k2 * theta + phase * 1.71) +
+    0.05 * Math.sin(5.11 * ta + k3 * theta + phase * 0.39)
   );
 }
+
+// Per-stream base spatial frequencies (radians of sinusoid phase per px of arc
+// position), indexed by the phase[] stream: [sb, Ab, Ac, coreSigma, sbIn].
+// These reproduce the pre-v0.4 `s · freq` multipliers; deriveGeometry rounds
+// freq·perimeter/2π to the nearest whole ring harmonic per stream.
+const SPATIAL_FREQ = [0.015, 0.011, 0.013, 0.02, 0.012] as const;
+
+// 8×8 ordered-dither (Bayer) matrix, offsets in [0,1): entries are
+// (rank + 0.5)/64 ∈ [0.0078, 0.9922]. Added to the 0..255 alpha before the
+// `| 0` FLOOR in writeNeonPixel so the 1/255 quantization contours in the faint
+// inner tail dissolve into an ordered stipple. This is the MEAN-PRESERVING
+// ordered dither: for a uniform offset u on [0,1), E[floor(v + u)] = v exactly,
+// so the dithered lattice reproduces the true alpha in the mean and the whole
+// glow — bright core included — keeps its brightness (a zero-mean ±0.5 offset
+// with floor would instead bias every pixel down by half an LSB). The dither
+// AMPLITUDE is still ±0.5 LSB about the rounded value, invisible at high alpha
+// and exactly what breaks mach banding in the tail. The lookup uses GLOBAL
+// pixel coords (px&7, py&7) so the dither lattice is continuous across all
+// eight tiles — no dither seam at tile boundaries.
+const BAYER8: Float32Array = (() => {
+  // Recursive doubling: M₂ₙ = [[4M, 4M+2], [4M+3, 4M+1]], seeded from [[0,2],[3,1]].
+  let m: number[][] = [[0, 2], [3, 1]];
+  while (m.length < 8) {
+    const s = m.length;
+    const nm: number[][] = Array.from({ length: s * 2 }, () => new Array<number>(s * 2));
+    for (let y = 0; y < s; y++) {
+      for (let x = 0; x < s; x++) {
+        const v = m[y][x] * 4;
+        nm[y][x] = v; nm[y][x + s] = v + 2;
+        nm[y + s][x] = v + 3; nm[y + s][x + s] = v + 1;
+      }
+    }
+    m = nm;
+  }
+  const f = new Float32Array(64);
+  for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) f[x + (y << 3)] = (m[y][x] + 0.5) / 64;
+  return f;
+})();
 
 function projectToEdge(x: number, y: number, W: number, H: number): { x: number; y: number } {
   const dl = x, dr = W - x, dt = y, db = H - y;
@@ -823,6 +909,13 @@ export function createAuraEngine(
   let CQ = 0, ARC = 0;
   let CORE_SIGMA_BASE = 0, CORE_SIGMA_VAR = 0;
   let INNER_SOFT_BASE = 0, INNER_SOFT_VAR = 0, INNER_SIGMA_MAX = 0;
+  // Corner fill (opt-in): when true the corner-exterior region continues the
+  // glow radially instead of feathering to transparent. FILL_DEN_MIN is the
+  // 2σ² floor for that radial Gaussian — 2·(0.75·CR)² — so the fill sigma is
+  // max(outward bloom sigma, 0.75·CR): wide enough that the physical square
+  // corner keeps meaningful luminance. Both derived in deriveGeometry.
+  let CORNER_FILL = false;
+  let FILL_DEN_MIN = 0;
 
   // Bloom depth profile scales with band so the falloff stays SELF-SIMILAR:
   // the sb sigma family (base, noise range, energy contributions, clamp bounds)
@@ -836,6 +929,48 @@ export function createAuraEngine(
   // geometry derive) so the per-column hot path pays zero extra cost.
   let SB_BASE = 0, SB_NOISE = 0, SB_KEY = 0, SB_HOT = 0, SB_BURST = 0;
   let SB_CLAMP_LO = 0, SB_CLAMP_HI = 0, INNER_SIGMA_MAX_EFF = 0;
+
+  // Per-stream integer ring harmonics (G1), derived from the current viewport
+  // perimeter in deriveGeometry. streamK1 is the base harmonic k ≈
+  // freq·perimeter/2π; k2/k3 preserve the pre-v0.4 octave ratios (1.71/0.39).
+  const streamK1 = new Int32Array(5);
+  const streamK2 = new Int32Array(5);
+  const streamK3 = new Int32Array(5);
+
+  // Corner arc-profile LUT (perf). drawCorner used to call neonAt PER PIXEL
+  // (~150 lit pixels/corner → ~600 calls/frame, each 5 ring-noise streams =
+  // 15 sin), which regressed drawFrame vs the pre-v0.4 frozen-corner snapshot.
+  // Instead we sample neonAt at CORNER_ARC_SAMPLES points along the quarter arc
+  // — the SAME live periodic field the adjacent strips see — and let each pixel
+  // reuse the nearest arc sample across its radial depth. That is exactly the
+  // strip discipline (one neonAt per along-path position, reused for every depth
+  // in the column), applied to a curved path instead of a straight one. The arc
+  // endpoints f = 0 / f = 1 are always exact samples, so the tile↔strip boundary
+  // columns still evaluate the same s as the strips; interior samples are spaced
+  // ≤ ~½ px of OUTER arc apart (see deriveGeometry), i.e. sub-LSB on alpha. The
+  // nine fields are exactly those writeNeonPixel reads. Allocated once per
+  // geometry derive, refilled per corner per frame → zero per-pixel allocation.
+  let CORNER_ARC_SAMPLES = 0;
+  let lutAc = new Float32Array(0);
+  let lutCoreDen = new Float32Array(0);
+  let lutAb = new Float32Array(0);
+  let lutBloomIn = new Float32Array(0);
+  let lutBloomOut = new Float32Array(0);
+  let lutR = new Float32Array(0);
+  let lutG = new Float32Array(0);
+  let lutB = new Float32Array(0);
+  let lutEnv = new Float32Array(0);
+
+  // Per-corner static geometry maps (perf). Every corner pixel's radial depth
+  // (tIn = CR − dist) and its nearest arc-sample index j depend ONLY on the
+  // pixel's position in the RIM×RIM tile and the fixed geometry (CR, thOff, NS)
+  // — not on time or input — so the per-pixel atan2 + sqrt that drove them are
+  // pure geometry and are hoisted out of the frame loop into these maps, filled
+  // once per geometry derive. jMap = −1 flags a pixel past the outward feather
+  // (skipped). Indexed [kind][ly*RIM + lx]; the values are bit-identical to the
+  // former inline computation, so the rendered bytes are unchanged.
+  const cornerJMap: Int16Array[] = [new Int16Array(0), new Int16Array(0), new Int16Array(0), new Int16Array(0)];
+  const cornerTInMap: Float32Array[] = [new Float32Array(0), new Float32Array(0), new Float32Array(0), new Float32Array(0)];
 
   const deriveGeometry = () => {
     INSET = clampOpt(geo.inset, 0, DEF_GEO.inset);
@@ -851,6 +986,9 @@ export function createAuraEngine(
     INNER_SOFT_BASE = geo.innerSoftBase;
     INNER_SOFT_VAR = geo.innerSoftVar;
     INNER_SIGMA_MAX = clampOpt(geo.innerSigmaMax, 1, DEF_GEO.innerSigmaMax);
+    CORNER_FILL = geo.cornerFill === true;
+    // 2σ² floor for the corner-fill radial Gaussian: σ ≥ 0.75·CR (see the lets).
+    FILL_DEN_MIN = 2 * (0.75 * CR) * (0.75 * CR);
 
     // Fold BLOOM_SCALE into every sb-pipeline constant (see the block comment
     // above). Only the BLOOM DEPTH family scales: core sigma, the tangential
@@ -865,6 +1003,77 @@ export function createAuraEngine(
     SB_CLAMP_LO = 4 * BLOOM_SCALE;
     SB_CLAMP_HI = 16 * BLOOM_SCALE;
     INNER_SIGMA_MAX_EFF = INNER_SIGMA_MAX * BLOOM_SCALE;
+
+    // Periodic-ring harmonics (G1): map each spatial noise frequency to the
+    // nearest WHOLE number of cycles around the ring, so every stream wraps
+    // exactly at s = perimeter. Derived from the current viewport perimeter;
+    // θ (= 2π·s/perimeter) uses the LIVE per-frame perimeter, and this runs on
+    // every geometry re-derive — creation, updateOptions({geometry}), and
+    // resize() — so the wavelength (= per/k) stays viewport-invariant and the
+    // field stays exactly periodic. A resize re-derive may visibly re-seed the
+    // spatial pattern (k can step to a new integer); acceptable. k2/k3 keep the
+    // original inner octave ratios (≈1.71 and ≈0.39 of the base).
+    const wv = Math.max(1, window.innerWidth);
+    const hv = Math.max(1, window.innerHeight);
+    const per = Math.max(1, 2 * (wv - 2 * RIM) + 2 * (hv - 2 * RIM) + 4 * ARC);
+    for (let i = 0; i < 5; i++) {
+      const k1 = Math.max(1, Math.round((per * SPATIAL_FREQ[i]) / TWO_PI));
+      streamK1[i] = k1;
+      streamK2[i] = Math.max(1, Math.round(1.71 * k1));
+      streamK3[i] = Math.max(1, Math.round(0.39 * k1));
+    }
+
+    // Corner arc-LUT resolution: ≥2 samples per px of the OUTER arc length
+    // (radius CR + INSET + feather), so nearest-sample lookup in drawCorner
+    // stays within ≤½ px of arc of the exact per-pixel position at every lit
+    // radius — sub-LSB on alpha, including the sensitive shallow tile-boundary
+    // columns. Reallocated only when the count changes (geometry, not per frame).
+    const outerR = CR + INSET + CORNER_FEATHER_PX;
+    const ns = Math.max(2, Math.ceil(2 * HALF_PI * outerR) + 1);
+    if (ns !== CORNER_ARC_SAMPLES) {
+      CORNER_ARC_SAMPLES = ns;
+      lutAc = new Float32Array(ns);
+      lutCoreDen = new Float32Array(ns);
+      lutAb = new Float32Array(ns);
+      lutBloomIn = new Float32Array(ns);
+      lutBloomOut = new Float32Array(ns);
+      lutR = new Float32Array(ns);
+      lutG = new Float32Array(ns);
+      lutB = new Float32Array(ns);
+      lutEnv = new Float32Array(ns);
+    }
+
+    // Fill the static corner geometry maps (see the declarations above). The
+    // arc center sits at a fixed local buffer corner per kind: RIM on axes the
+    // tile extends negatively along (CORNER_*_NEG), 0 otherwise. Rebuilt here
+    // because RIM / CR / INSET / ns can all change on a geometry re-derive.
+    const rim2 = RIM * RIM;
+    const nsSpan = ns - 1;
+    // When filling, cover the WHOLE RIM×RIM tile out to the physical square
+    // corner (tIn down to CR − RIM·√2 < 0), so no exterior pixel is skipped;
+    // otherwise stop one feather past INSET, where the rounded ring dies.
+    const skipBelow = CORNER_FILL ? -Infinity : -(INSET + CORNER_FEATHER_PX);
+    for (let kind = 0; kind < 4; kind++) {
+      const lcx = CORNER_X_NEG[kind] ? RIM : 0;
+      const lcy = CORNER_Y_NEG[kind] ? RIM : 0;
+      const thOff = CORNER_TH_OFFSET[kind];
+      const jm = new Int16Array(rim2);
+      const tm = new Float32Array(rim2);
+      let li = 0;
+      for (let ly = 0; ly < RIM; ly++) {
+        for (let lx = 0; lx < RIM; lx++, li++) {
+          const dx = lx + 0.5 - lcx;
+          const dy = ly + 0.5 - lcy;
+          const tIn = CR - Math.sqrt(dx * dx + dy * dy);
+          if (tIn < skipBelow) { jm[li] = -1; continue; }
+          const f = clamp((Math.atan2(dy, dx) + thOff) / HALF_PI, 0, 1);
+          jm[li] = (f * nsSpan + 0.5) | 0;
+          tm[li] = tIn;
+        }
+      }
+      cornerJMap[kind] = jm;
+      cornerTInMap[kind] = tm;
+    }
   };
 
   let KEY_SIGMA = 0, TAP_SIGMA = 0;
@@ -930,11 +1139,13 @@ export function createAuraEngine(
   let DARK_CHROMA: number = EDGE_AURA_DEFAULTS.palette.darkChroma;
   let BLEND_MODE: "source-over" | "screen" | "plus-lighter" = "source-over";
 
-  // Dark-mode alpha response LUT: darkAlphaLut[i] = pow(i/255, gamma), indexed
-  // by the geometric coverage byte. Refilled by derivePalette (gamma may change
-  // on update); read only on dark backgrounds — the light hot path never
-  // touches it, and gamma 1 makes it the identity.
-  const darkAlphaLut = new Float32Array(256);
+  // Dark-mode alpha response LUT: darkAlphaLut[i] = pow(i/DARK_ALPHA_LUT_MAX,
+  // gamma), indexed by (aGeom * DARK_ALPHA_LUT_MAX) | 0 — the coverage is
+  // quantized to DARK_ALPHA_LUT_SIZE input levels BEFORE the pow, so the faint
+  // dark terminus resolves finely (see the const's note). Refilled by
+  // derivePalette (gamma may change on update); read only on dark backgrounds —
+  // the light hot path never touches it, and gamma 1 makes it the identity.
+  const darkAlphaLut = new Float32Array(DARK_ALPHA_LUT_SIZE);
 
   const derivePalette = () => {
     DARK_BG = pal.background === "dark";
@@ -966,7 +1177,9 @@ export function createAuraEngine(
       pal.blendMode === "screen" || pal.blendMode === "plus-lighter"
         ? pal.blendMode
         : "source-over";
-    for (let i = 0; i < 256; i++) darkAlphaLut[i] = Math.pow(i / 255, DARK_ALPHA_GAMMA);
+    for (let i = 0; i < DARK_ALPHA_LUT_SIZE; i++) {
+      darkAlphaLut[i] = Math.pow(i / DARK_ALPHA_LUT_MAX, DARK_ALPHA_GAMMA);
+    }
   };
 
   deriveGeometry();
@@ -1215,6 +1428,11 @@ export function createAuraEngine(
   // -------------------------------------------------------------------------
   let frameIntensity = 1;
   let perimeter = 1;
+  // TWO_PI / perimeter, hoisted out of neonAt's hot loop: neonAt runs ~2.9k
+  // times/frame and the ring angle θ = thetaScale·s is the only place perimeter
+  // divides. Set once per frame from the fresh perimeter in drawFrame (the sole
+  // path that reaches neonAt), turning a per-call divide into a per-call mul.
+  let thetaScale = TWO_PI;
   let hotEdge = BOTTOM;
   let hotTan  = 0;
 
@@ -1243,36 +1461,38 @@ export function createAuraEngine(
   // doesn't recompute the easing per arc position. Only read while kindling.
   let kindleFront = 0;
 
-  // -- Corner-continuity profiles (diagonal / wrap seam fix) -----------------
+  // -- Corner-continuity profiles (diagonal medial-axis seam) ----------------
   // The strips split interior pixels along the 45° corner diagonals (see
   // drawStrip's dEnd clamp), and each strip evaluates neonAt at its OWN
-  // edge-projected arc position: the two pixels straddling a diagonal sample
-  // the noise streams up to ~2·BAND px of path distance apart — and across
-  // the s = 0 / s = perimeter wrap at the TL corner, where the streams are
-  // fully decorrelated (they are not perimeter-periodic). The resulting
-  // amplitude/width step is sub-quantization on light backgrounds but the
-  // darkAlphaGamma response lifts deep-bloom alphas several-fold and exposes
-  // it as a brightness seam.
+  // edge-projected arc position. Along the diagonal the nearest-centerline
+  // point is ambiguous — the rounded-rect medial axis branches there — so the
+  // two owning strips sample arc positions that diverge with depth (~2·depth
+  // apart). The resulting amplitude/width step is a geometric discontinuity in
+  // the arc-position field, NOT a noise-wrap artifact: the G1 periodic field
+  // already makes the field byte-identical across the s = 0 / s = perimeter
+  // closure (so the TL corner, which straddles it, is naturally small), but the
+  // diagonal ridge at every corner remains and the darkAlphaGamma response
+  // lifts deep-bloom alphas several-fold, exposing it as a brightness seam.
   //
-  // Fix by construction, in PROFILE space (an arc-position blend cannot work
-  // at TL — no s-space path crosses the noise wrap smoothly): once per frame,
-  // snap the noise profile at each corner's arc midpoint. The diagonal cut for
-  // a near-corner column only lives at DEEP depths — a column at distance c
-  // from the corner tile is clipped at depth d ≈ RIM + c (dEnd's diagonal
-  // clamp), so shallow pixels (the bright core + inner bloom) are never on the
-  // cut. So each blended column keeps its OWN live profile at shallow depth and
-  // crossfades — WITH DEPTH — to the shared corner profile over
+  // Fix with a minimal DEPTH crossfade to a shared per-corner profile: once per
+  // frame, snap the noise profile at each corner's arc midpoint. The diagonal
+  // cut for a near-corner column only lives at DEEP depths — a column at
+  // distance c from the corner tile is clipped at depth d ≈ RIM + c (dEnd's
+  // diagonal clamp), so shallow pixels (the bright core + inner bloom) are
+  // never on the cut. Each blended column keeps its OWN live profile at shallow
+  // depth and crossfades — WITH DEPTH — to the shared corner profile over
   // CORNER_DEPTH_FADE_PX px, completing exactly at the cut depth. Both diagonal
-  // owners reach weight 1 at that shared depth, so they converge to the SAME
-  // profile there and the step vanishes; shallow pixels keep live per-column
-  // noise, so the near-corner core/bloom no longer freezes into a flat band
-  // (the earlier whole-column freeze read as interference at large band). A
-  // small extra shallow lift over the first CORNER_TILE_ADJ_COLS columns closes
-  // the tile/strip boundary (the tile renders wholly on the midpoint profile).
-  // Corner tiles copy the midpoint profile, which also closes the wrap seam at
-  // the TL tile/strip boundary. np.env (kindle reveal) is intentionally NOT
-  // blended: it must keep sweeping per arc position and is already circularly
-  // continuous across the wrap.
+  // owners reach weight 1 at that shared depth, converging to the SAME profile
+  // there so the step vanishes; shallow pixels keep live per-column noise.
+  //
+  // v0.4: the crossfade is DEEP-ONLY. The corner TILE now renders the periodic
+  // field live per pixel (drawCorner), not the frozen midpoint, so there is no
+  // longer any shallow tile-adjacency lift pulling near-corner strip columns
+  // toward the midpoint — the live tile and the live strips meet on the same
+  // periodic field at the (shallow) tile boundary within the seam gate. The
+  // midpoint snapshot survives ONLY as the deep convergence target that nulls
+  // the geometric diagonal ridge. np.env (kindle reveal) is intentionally NOT
+  // blended: it must keep sweeping per arc position and is already continuous.
   const cornerNp = [0, 1, 2, 3].map(() => ({
     Ac: 0, coreDen: 0, Ab: 0, bloomDenOut: 0, sbIn: 0, bloomDenIn: 0,
     r: 0, g: 0, b: 0,
@@ -1299,8 +1519,7 @@ export function createAuraEngine(
       const my = ccy + (CORNER_Y_NEG[kind] ? -md : md);
       // Hotspot gating inherits the corner tile's f = 0.5 convention
       // (edges[1]); both hotspot Gaussians are exponentially small this far
-      // from any straight-edge hotspot, so the edge choice is a tie-break,
-      // not a visible decision.
+      // from any straight-edge hotspot, so the edge choice is a tie-break.
       const edgeId = CORNER_EDGES[kind][1];
       const tan = edgeId === TOP || edgeId === BOTTOM ? mx : my;
       neonAt(arcS0[CORNER_ARC_INDEX[kind]] + ARC / 2, edgeId, tan);
@@ -1321,10 +1540,9 @@ export function createAuraEngine(
   };
 
   // Set np = lerp(ownNp, corner, w) for every field writeNeonPixel reads
-  // (np.env is deliberately left alone — the kindle reveal must keep sweeping
-  // per arc position). sbIn and bloomDenIn lerp independently — sbIn only
-  // drives the integer column reach, so a mid-blend mismatch with 2·sbIn² is
-  // confined to a ±1 px cutoff of near-zero alpha.
+  // (np.env is deliberately left alone). sbIn and bloomDenIn lerp
+  // independently — sbIn only drives the integer column reach, so a mid-blend
+  // mismatch with 2·sbIn² is confined to a ±1 px cutoff of near-zero alpha.
   const lerpNpToCorner = (p: CornerProfile, w: number) => {
     np.Ac = ownNp.Ac + w * (p.Ac - ownNp.Ac);
     np.coreDen = ownNp.coreDen + w * (p.coreDen - ownNp.coreDen);
@@ -1346,6 +1564,11 @@ export function createAuraEngine(
     const t = elapsed;
     const burst = sBurst.x;
 
+    // Ring angle for the periodic spatial noise (G1). All five streams share
+    // this θ; each takes integer harmonics k1/k2/k3 of it, so the field wraps
+    // exactly at s = perimeter regardless of the perimeter k was derived for.
+    const theta = thetaScale * s;
+
     // Key bumps live on the bottom edge only: Σ spring × Gaussian over the
     // independent fixed-position bumps.
     let keySum = 0;
@@ -1364,18 +1587,18 @@ export function createAuraEngine(
     }
 
     // Core amplitude — near-opaque centerline with a faint organic shimmer.
-    np.Ac = 0.92 + 0.08 * noise(t * 0.5, s * 0.013 + phase[2]);
+    np.Ac = 0.92 + 0.08 * ringNoise(t * 0.5, theta, streamK1[2], streamK2[2], streamK3[2], phase[2]);
 
     // Core thickness undulates smoothly along the ring (slow noise — the
     // same stream stays continuous through the corner arcs).
-    const sc = CORE_SIGMA_BASE + CORE_SIGMA_VAR * (2 * noise(t * 0.4, s * 0.02 + phase[3]) - 1);
+    const sc = CORE_SIGMA_BASE + CORE_SIGMA_VAR * (2 * ringNoise(t * 0.4, theta, streamK1[3], streamK2[3], streamK3[3], phase[3]) - 1);
     np.coreDen = 2 * sc * sc;
 
     // Bloom amplitude + width swell with the energy springs.  The rest-state
     // amplitude breathes deep (0.15–0.65) so the half-max line width visibly
     // collapses and swells (~5–10px) instead of hovering near constant.
     np.Ab = clamp(
-      0.15 + 0.50 * noise(t * 0.5, s * 0.011 + phase[1]) +
+      0.15 + 0.50 * ringNoise(t * 0.5, theta, streamK1[1], streamK2[1], streamK3[1], phase[1]) +
         0.30 * keySum +
         0.25 * sHot.x * hotG +
         0.15 * burst,
@@ -1398,7 +1621,7 @@ export function createAuraEngine(
     // BLOOM_SCALE in deriveGeometry, so the bloom depth falloff shrinks with the
     // band and the profile stays self-similar (default band → identity).
     const sb = clamp(
-      SB_BASE + SB_NOISE * noise(t * 0.6, s * 0.015 + phase[0]) +
+      SB_BASE + SB_NOISE * ringNoise(t * 0.6, theta, streamK1[0], streamK2[0], streamK3[0], phase[0]) +
         SB_KEY * keySum +
         SB_HOT * sHot.x * hotG +
         SB_BURST * burst,
@@ -1412,7 +1635,7 @@ export function createAuraEngine(
     // scales with the band too.
     const sbIn = Math.min(
       INNER_SIGMA_MAX_EFF,
-      sb * (INNER_SOFT_BASE + INNER_SOFT_VAR * noise(t * 0.45, s * 0.012 + phase[4])),
+      sb * (INNER_SOFT_BASE + INNER_SOFT_VAR * ringNoise(t * 0.45, theta, streamK1[4], streamK2[4], streamK3[4], phase[4])),
     );
     np.sbIn = sbIn;
     np.bloomDenIn = 2 * sbIn * sbIn;
@@ -1439,6 +1662,11 @@ export function createAuraEngine(
     }
   };
 
+  // True only while drawCorner writes a corner TILE's pixels; gates the
+  // opt-in corner fill (below) so it never touches strip pixels. Strips leave
+  // it false, so their outward region (|tIn| ≤ INSET − 0.5) is byte-identical.
+  let inCornerTile = false;
+
   // Shared per-pixel neon profile: core + bloom Gaussians from np, scaled by
   // frame intensity, core whitened toward 255.  tIn is the signed distance
   // to the centerline with INWARD POSITIVE on every segment (straights:
@@ -1455,52 +1683,102 @@ export function createAuraEngine(
   // only corner tiles, whose square region extends past INSET, round off —
   // ending ~INSET px beyond the arc, tangent to both screen edges.
   //
+  // CORNER FILL (opt-in, corner tiles only): when CORNER_FILL is on, the
+  // corner-exterior region (tIn < 0) instead continues the glow radially —
+  // (Ac,Ab) scaled by a Gaussian gFill = exp(−tIn²/max(bloomDenOut, FILL_DEN_MIN))
+  // in the radial distance |tIn|. gFill(0) = 1, so at the arc the fill equals
+  // the flat centerline value the inward side lands on (C0), and both sides'
+  // slopes vanish at tIn = 0 (C1) — no boundary at the arc. The widened sigma
+  // (≥ 0.75·CR) keeps the physical square corner luminous. The outward feather
+  // is disabled here (mutually exclusive); the core term still whitens, fading
+  // with gFill. Straights never enter this branch (inCornerTile is false).
+  //
   // On dark backgrounds the geometric coverage is additionally pushed through
   // the darkAlphaLut response curve (pow(coverage, darkAlphaGamma)) before
   // compositing; the light path skips that indirection entirely.
+  //
+  // (px, py) are the GLOBAL pixel coordinates, used only for the ordered-dither
+  // lookup on the final alpha — see BAYER8. Threading them (instead of a per-
+  // pixel modulo derive) keeps the lattice continuous across every tile.
   const writeNeonPixel = (
     data: Uint8ClampedArray,
     idx: number,
     tIn: number,
+    px: number,
+    py: number,
   ): number => {
-    const t = tIn < 0 ? 0 : tIn;
-    const tt = t * t;
-    // Core is negligible past tt ≈ 40 (exp(−40/5.8) < 0.001) — skipping the
-    // exp matters because the long inner tail makes deep pixels the
-    // majority of the loop.
-    const core = tt < 40 ? np.Ac * Math.exp(-tt / np.coreDen) : 0;
-    let bloom: number;
-    if (t > 0) {
-      // Long-tailed rational falloff: (1 + t²/2σ²)^−1.5, computed as
-      // u·√u (no Math.pow).  The quartic window eases it to exactly 0 at
-      // BAND depth so the buffer edge never shows as a line.
-      const u = 1 + tt / np.bloomDenIn;
-      const x = (t + INSET) / BAND;
-      const x2 = x * x;
-      const win = 1 - x2 * x2;
-      bloom = win > 0 ? (np.Ab * win) / (u * Math.sqrt(u)) : 0;
-    } else {
-      bloom = np.Ab * Math.exp(-tt / np.bloomDenOut);
-    }
-    // Outward feather: flat to INSET px, then a CORNER_FEATHER_PX fade to 0.
-    // Exactly 1 for every straight-edge pixel (|tIn| ≤ INSET − 0.5).
+    // Issue the ordered-dither table load up front (see BAYER8 / the write
+    // below) so its ~4-cycle dependent-load latency overlaps the core/bloom
+    // transcendentals instead of stalling at the end of the pixel — the tail is
+    // the majority of the loop, so hiding this load is a real win. Pure reorder,
+    // byte-identical. (px & 7)/(py & 7) index the continuous 8×8 lattice.
+    const dOff = BAYER8[(px & 7) + ((py & 7) << 3)];
+    let core: number, bloom: number;
     let outwardFade = 1;
-    if (tIn < 0) {
-      const aOut = -tIn;
-      if (aOut > INSET) {
-        outwardFade = 1 - smoothstep01((aOut - INSET) / CORNER_FEATHER_PX);
+    if (CORNER_FILL && inCornerTile && tIn < 0) {
+      // Corner fill: smooth radial continuation of the centerline profile out
+      // into the square-corner exterior. gFill is a Gaussian in the radial
+      // distance |tIn| with a widened sigma (2σ² = max(bloomDenOut, FILL_DEN_MIN),
+      // i.e. σ = max(outward bloom σ, 0.75·CR)); gFill(0) = 1 so the arc value
+      // matches the inward side (C0/C1), and it decays gently so the physical
+      // corner stays luminous. The feather is disabled in this region.
+      const fillDen = np.bloomDenOut > FILL_DEN_MIN ? np.bloomDenOut : FILL_DEN_MIN;
+      const gFill = Math.exp(-(tIn * tIn) / fillDen);
+      core = np.Ac * gFill;
+      bloom = np.Ab * gFill;
+    } else {
+      const t = tIn < 0 ? 0 : tIn;
+      const tt = t * t;
+      // Core is negligible past tt ≈ 40 (exp(−40/5.8) < 0.001) — skipping the
+      // exp matters because the long inner tail makes deep pixels the
+      // majority of the loop.
+      core = tt < 40 ? np.Ac * Math.exp(-tt / np.coreDen) : 0;
+      if (t > 0) {
+        // Long-tailed rational falloff: (1 + t²/2σ²)^−1.5, computed as
+        // u·√u (no Math.pow). The inner window (G2a) eases it to exactly 0 at
+        // BAND depth so the buffer edge never shows as a line. It is
+        // smoothstep(1 − x⁴): monotone, 1 at x=0, and — unlike the previous
+        // bare 1 − x⁴ (slope −4 at x=1) — it lands on 0 with ZERO SLOPE (C1),
+        // so the inner face dissolves without a mach-band kink. Cost: one extra
+        // smoothstep (3 mul), no pow. It stays fuller than (1 − x⁴)² through the
+        // 0.5–0.85 mid-band (e.g. x=0.7 → 0.855 vs 0.577), preserving the tail's
+        // body for thin rings, and only dives faster in the last few px.
+        const u = 1 + tt / np.bloomDenIn;
+        const x = (t + INSET) / BAND;
+        const x2 = x * x;
+        const w4 = 1 - x2 * x2;                    // 1 − x⁴
+        const win = w4 > 0 ? w4 * w4 * (3 - 2 * w4) : 0; // smoothstep(1 − x⁴)
+        bloom = win > 0 ? (np.Ab * win) / (u * Math.sqrt(u)) : 0;
+      } else {
+        bloom = np.Ab * Math.exp(-tt / np.bloomDenOut);
+      }
+      // Outward feather: flat to INSET px, then a CORNER_FEATHER_PX fade to 0.
+      // Exactly 1 for every straight-edge pixel (|tIn| ≤ INSET − 0.5).
+      if (tIn < 0) {
+        const aOut = -tIn;
+        if (aOut > INSET) {
+          outwardFade = 1 - smoothstep01((aOut - INSET) / CORNER_FEATHER_PX);
+        }
       }
     }
     const aGeom = Math.min(1, core + bloom);
     const a = DARK_BG
-      ? darkAlphaLut[(aGeom * 255) | 0] * frameIntensity * np.env * outwardFade
+      ? darkAlphaLut[(aGeom * DARK_ALPHA_LUT_MAX) | 0] * frameIntensity * np.env * outwardFade
       : aGeom * frameIntensity * np.env * outwardFade;
     if (a >= ALPHA_EPS) {
       const wm = CORE_WHITEN * core;
       data[idx]     = np.r + (255 - np.r) * wm;
       data[idx + 1] = np.g + (255 - np.g) * wm;
       data[idx + 2] = np.b + (255 - np.b) * wm;
-      data[idx + 3] = a * 255;
+      // Ordered alpha dithering (G2b): break the 1/255 quantization contours in
+      // the faint tail with a Bayer offset in [0,1) added before the `| 0`
+      // floor. This is mean-preserving (E[floor(a·255 + u)] = a·255 for u
+      // uniform on [0,1)), so no pixel — bright core or faint tail — shifts in
+      // the mean; the offset only perturbs ±0.5 LSB about the rounded value,
+      // invisible at high alpha and exactly what dissolves the mach-band tail.
+      // writeColumn's early break is driven by the PRE-dither `a` (the return
+      // value), so loop bounds are unchanged.
+      data[idx + 3] = (a * 255 + dOff) | 0;
     }
     return a;
   };
@@ -1508,17 +1786,24 @@ export function createAuraEngine(
   // Write one inward column of the neon profile (current np) into a strip
   // buffer.  base/strideBytes encode the edge-specific pixel layout; depth d
   // runs from the screen edge inward.  Breaks out as soon as t is past the
-  // centerline and both Gaussians are negligible.
+  // centerline and both Gaussians are negligible. (pxCol, pyCol) are the global
+  // coords of the shallowest pixel (d = 0); (pxStep, pyStep) advance them per
+  // depth — one axis is the fixed along-edge coord, the other tracks depth.
   const writeColumn = (
     data: Uint8ClampedArray,
     base: number,
     strideBytes: number,
     dEnd: number,
+    pxCol: number,
+    pyCol: number,
+    pxStep: number,
+    pyStep: number,
   ) => {
     let idx = base;
-    for (let d = 0; d < dEnd; d++, idx += strideBytes) {
+    let px = pxCol, py = pyCol;
+    for (let d = 0; d < dEnd; d++, idx += strideBytes, px += pxStep, py += pyStep) {
       const tIn = d + 0.5 - INSET;
-      const a = writeNeonPixel(data, idx, tIn);
+      const a = writeNeonPixel(data, idx, tIn, px, py);
       if (a < ALPHA_EPS && tIn > 0) break; // both terms only shrink from here on
     }
   };
@@ -1528,12 +1813,10 @@ export function createAuraEngine(
   // completes (weight 1) at the diagonal cut depth `diagCut` — the deepest
   // pixel this column draws before the diagonal hands the rest to the adjacent
   // strip — so both owning strips agree there and the seam nulls; shallower
-  // pixels stay on the live per-column profile (no frozen band). `wColFloor`
-  // is a constant per-column shallow lift (>0 only for the first few columns
-  // next to the corner tile) that also pulls those shallow pixels toward the
-  // corner profile so the strip meets the tile without a step. The extra
-  // per-pixel math is confined to near-corner columns; mid-edge columns take
-  // the plain writeColumn path and stay byte-identical.
+  // pixels stay on the live per-column profile (no frozen band, and — since the
+  // corner tile is now itself rendered live per-pixel — no shallow lift toward
+  // the midpoint that would step against it). (px, py) thread the global dither
+  // coords exactly like writeColumn.
   const writeColumnBlend = (
     data: Uint8ClampedArray,
     base: number,
@@ -1541,24 +1824,25 @@ export function createAuraEngine(
     dEnd: number,
     corner: CornerProfile,
     diagCut: number,
-    wColFloor: number,
+    pxCol: number,
+    pyCol: number,
+    pxStep: number,
+    pyStep: number,
   ) => {
     snapOwnNp();
-    // Ramp reaches weight 1 at the deepest drawn diagonal pixel (dEnd − 1 when
-    // the diagonal clips, i.e. diagCut − 1), starting CORNER_DEPTH_FADE_PX px
-    // shallower.
+    // Ramp reaches weight 1 at the deepest drawn diagonal pixel (diagCut − 1),
+    // starting CORNER_DEPTH_FADE_PX px shallower.
     const dLo = diagCut - 1 - CORNER_DEPTH_FADE_PX;
     let idx = base;
+    let px = pxCol, py = pyCol;
     // No early break here: unlike a single profile, the crossfade makes alpha
     // NON-monotonic in depth (the column's own bloom fades, then the corner
     // profile rises to the shared cut value), so a dip below ε mid-crossfade
     // does not mean the tail is done — breaking would clip the deep corner
-    // tail and re-open the ownership seam. dEnd already bounds the loop by the
-    // corner reach / diagonal clamp, and blended columns are corner-local.
-    for (let d = 0; d < dEnd; d++, idx += strideBytes) {
-      const wDepth = smoothstep01((d - dLo) / CORNER_DEPTH_FADE_PX);
-      lerpNpToCorner(corner, wColFloor > wDepth ? wColFloor : wDepth);
-      writeNeonPixel(data, idx, d + 0.5 - INSET);
+    // tail and re-open the ownership seam. dEnd already bounds the loop.
+    for (let d = 0; d < dEnd; d++, idx += strideBytes, px += pxStep, py += pyStep) {
+      lerpNpToCorner(corner, smoothstep01((d - dLo) / CORNER_DEPTH_FADE_PX));
+      writeNeonPixel(data, idx, d + 0.5 - INSET, px, py);
     }
   };
 
@@ -1596,6 +1880,16 @@ export function createAuraEngine(
     base0: number;
     basePerI: number;
     strideBytes: number;
+    // Global pixel coords for the ordered-dither lookup: (pxAtI0, pyAtI0) is
+    // column i = 0's shallowest pixel; (pxPerI, pyPerI) steps per column along
+    // the edge; (pxPerD, pyPerD) steps per depth d inward. One axis is the
+    // along-edge coord, the other the depth coord (see drawStrips).
+    pxAtI0: number;
+    pyAtI0: number;
+    pxPerI: number;
+    pyPerI: number;
+    pxPerD: number;
+    pyPerD: number;
     // Corner kinds (0 TL, 1 TR, 2 BR, 3 BL) adjacent to column i = 0 and
     // i = count − 1, for the corner-continuity crossfade.
     startCorner: number;
@@ -1616,30 +1910,32 @@ export function createAuraEngine(
       const iEnd = count - 1 - i; // column distance from the far corner
       const diag = Math.min(g, cfg.limit - 1 - g) + cfg.ownBias;
       const base = cfg.base0 + i * cfg.basePerI;
-      // The diagonal cut only lands within the visible band for near-corner
-      // columns (diag < BAND); those crossfade to the shared corner profile at
-      // depth, so the seam nulls without freezing the shallow core/bloom.
-      // Everything else takes the plain path and is byte-identical to before.
+      const pxCol = cfg.pxAtI0 + i * cfg.pxPerI;
+      const pyCol = cfg.pyAtI0 + i * cfg.pyPerI;
+      // Near-corner columns (diag < BAND) crossfade — WITH DEPTH ONLY — to the
+      // shared per-corner midpoint profile, converging exactly at the diagonal
+      // cut so the two owning strips agree there (nulls the medial-axis seam;
+      // see the corner-continuity block). This is the MINIMAL blend the field's
+      // intrinsic diagonal discontinuity forces: measured without it, the seam
+      // reaches 16–31/255 on dark. It touches ONLY the deep diagonal-cut region;
+      // there is no shallow tile-adjacency lift, so the live corner tile and the
+      // strips meet purely on the periodic field at the (shallow) tile boundary.
       if (diag < BAND) {
-        const nearStart = i <= iEnd;
-        const corner = cornerNp[nearStart ? cfg.startCorner : cfg.endCorner];
-        const colDist = nearStart ? i : iEnd;
+        const corner = cornerNp[i <= iEnd ? cfg.startCorner : cfg.endCorner];
         // Clip the deep tail by the CORNER profile's reach, not the column's
-        // own: pixels near the diagonal cut use the corner profile, so adjacent
-        // columns owning the same corner must share the same deepest drawn
-        // depth — otherwise one strip draws a faint tail pixel its neighbour
-        // clips, re-opening a ±1 px seam at the ownership boundary.
+        // own: adjacent columns owning the same corner must share the same
+        // deepest drawn depth, else one strip draws a faint tail pixel its
+        // neighbour clips, re-opening a ±1 px seam at the ownership boundary.
         const dEnd = Math.min(reach(corner.sbIn), diag);
-        // Shallow tile-adjacency lift over the first CORNER_TILE_ADJ_COLS
-        // columns (fades to 0), so the strip meets the midpoint-profile tile
-        // without a boundary step.
-        const wColFloor =
-          colDist < CORNER_TILE_ADJ_COLS
-            ? 1 - smoothstep01(colDist / CORNER_TILE_ADJ_COLS)
-            : 0;
-        writeColumnBlend(data, base, cfg.strideBytes, dEnd, corner, diag, wColFloor);
+        writeColumnBlend(
+          data, base, cfg.strideBytes, dEnd, corner, diag,
+          pxCol, pyCol, cfg.pxPerD, cfg.pyPerD,
+        );
       } else {
-        writeColumn(data, base, cfg.strideBytes, Math.min(reach(np.sbIn), diag));
+        writeColumn(
+          data, base, cfg.strideBytes, Math.min(reach(np.sbIn), diag),
+          pxCol, pyCol, cfg.pxPerD, cfg.pyPerD,
+        );
       }
     }
     buf.cx.putImageData(buf.img, 0, 0);
@@ -1659,19 +1955,26 @@ export function createAuraEngine(
     const leftW  = stripLeft   ? stripLeft.cv.width    : 0;
     const rightW = stripRight  ? stripRight.cv.width   : 0;
     // Clockwise s direction: top and right run with increasing coordinate,
-    // bottom and left run against it.
+    // bottom and left run against it. The dither px/py mapping: horizontal
+    // strips fix px = RIM + i and step py with depth (top downward, bottom
+    // upward from H − 1); vertical strips fix py = RIM + i and step px with
+    // depth (left rightward, right leftward from W − 1).
     const strips: StripCfg[] = [
       { buf: stripTop,    edgeId: TOP,    sBase: -RIM,               sDir:  1, limit: W, ownBias: 1,
         base0: 0,                    basePerI: 4,          strideBytes:  topW * 4,
+        pxAtI0: RIM, pyAtI0: 0,     pxPerI: 1, pyPerI: 0, pxPerD: 0, pyPerD:  1,
         startCorner: 0, endCorner: 1 },
       { buf: stripBottom, edgeId: BOTTOM, sBase: sBottom0 + W - RIM, sDir: -1, limit: W, ownBias: 1,
         base0: (botH - 1) * botW * 4, basePerI: 4,         strideBytes: -botW * 4,
+        pxAtI0: RIM, pyAtI0: H - 1, pxPerI: 1, pyPerI: 0, pxPerD: 0, pyPerD: -1,
         startCorner: 3, endCorner: 2 },
       { buf: stripLeft,   edgeId: LEFT,   sBase: sLeft0 + H - RIM,   sDir: -1, limit: H, ownBias: 0,
         base0: 0,                    basePerI: leftW * 4,  strideBytes:  4,
+        pxAtI0: 0,     pyAtI0: RIM, pxPerI: 0, pyPerI: 1, pxPerD:  1, pyPerD: 0,
         startCorner: 0, endCorner: 3 },
       { buf: stripRight,  edgeId: RIGHT,  sBase: sRight0 - RIM,      sDir:  1, limit: H, ownBias: 0,
         base0: (rightW - 1) * 4,     basePerI: rightW * 4, strideBytes: -4,
+        pxAtI0: W - 1, pyAtI0: RIM, pxPerI: 0, pyPerI: 1, pxPerD: -1, pyPerD: 0,
         startCorner: 1, endCorner: 2 },
     ];
     for (const cfg of strips) drawStrip(cfg);
@@ -1698,46 +2001,63 @@ export function createAuraEngine(
     const s0 = arcS0[CORNER_ARC_INDEX[kind]];
     const thOff = CORNER_TH_OFFSET[kind];
     const edges = CORNER_EDGES[kind];
-    // Corner continuity: the whole tile renders with the arc-midpoint noise
-    // profile (the natural variation across a quarter arc is sub-quantization
-    // anyway), which matches the w = 1 span of both adjacent strips at the
-    // tile boundaries — including across the s = 0 noise wrap at TL. Only
-    // np.env still varies per pixel, so neonAt is needed only while kindling.
-    const p = cornerNp[kind];
+    // G1: the tile renders the FULL live neon profile, evaluated at each pixel's
+    // own arc position s = s0 + f·ARC. Because the spatial noise field is now
+    // periodic in the ring (see ringNoise / streamK*), the undulation is a
+    // continuous sample of the same field the adjacent straights see, so it flows
+    // without a break across the quarter arc and matches the strips at both tile
+    // boundaries. (Pre-v0.4 this froze to a single arc-midpoint snapshot, which
+    // read as a flat, dead corner — the exact artifact this restores.)
+    //
+    // Perf: rather than call the 15-sin neonAt per pixel, build a per-arc-sample
+    // profile LUT once (CORNER_ARC_SAMPLES points along the quarter arc) and let
+    // each pixel reuse the nearest sample across its radial depth — the strip
+    // discipline for a curved path. neonAt is called exactly here, so the field
+    // is identical to the per-pixel version to within the sample spacing. The
+    // per-sample tangential coordinate is the arc point's projection onto the
+    // adjacent straight edge (matching how strips take tan from the along-edge
+    // coord, reused for all depths) rather than each deep pixel's own coord;
+    // sub-px and only gates the transient hotspot, which is exp-small this deep.
+    const NS = CORNER_ARC_SAMPLES;
+    const nsSpan = NS - 1;
+    for (let j = 0; j < NS; j++) {
+      const f = j / nsSpan;
+      const edgeId = f < 0.5 ? edges[0] : edges[1];
+      const arcAngle = f * HALF_PI - thOff;
+      const apx = ccx + CR * Math.cos(arcAngle);
+      const apy = ccy + CR * Math.sin(arcAngle);
+      const tan = edgeId === TOP || edgeId === BOTTOM ? apx : apy;
+      neonAt(s0 + f * ARC, edgeId, tan);
+      lutAc[j] = np.Ac; lutCoreDen[j] = np.coreDen; lutAb[j] = np.Ab;
+      lutBloomIn[j] = np.bloomDenIn; lutBloomOut[j] = np.bloomDenOut;
+      lutR[j] = np.r; lutG[j] = np.g; lutB[j] = np.b; lutEnv[j] = np.env;
+    }
 
-    for (let py = py0; py < py0 + RIM; py++) {
-      for (let px = px0; px < px0 + RIM; px++) {
-        const dx = px + 0.5 - ccx;
-        const dy = py + 0.5 - ccy;
-        // Inward-positive signed distance: pixels closer to the arc CENTER
-        // than CR are on the screen-interior side of the centerline.
-        const tIn = CR - Math.hypot(dx, dy);
-
-        // Early skip: beyond the outward feather (radialDist > CR + INSET +
-        // CORNER_FEATHER_PX, i.e. tIn < −(INSET + feather)) the feather has
-        // already reached 0 — nothing to write, and a perf win on the square
-        // corner region the rounded glow no longer fills.
-        if (tIn < -(INSET + CORNER_FEATHER_PX)) continue;
-
-        if (kindleActive) {
-          // Clockwise fraction along this quarter arc (0..1) — only the
-          // reveal envelope consumes the arc position now.
-          const f = clamp((Math.atan2(dy, dx) + thOff) / HALF_PI, 0, 1);
-          const edgeId = f < 0.5 ? edges[0] : edges[1];
-          const tan = (edgeId === TOP || edgeId === BOTTOM) ? px + 0.5 : py + 0.5;
-          neonAt(s0 + f * ARC, edgeId, tan); // sets np.env for this pixel
-        } else {
-          np.env = 1;
-        }
-        np.Ac = p.Ac; np.coreDen = p.coreDen; np.Ab = p.Ab;
-        np.bloomDenOut = p.bloomDenOut; np.sbIn = p.sbIn;
-        np.bloomDenIn = p.bloomDenIn;
-        np.r = p.r; np.g = p.g; np.b = p.b;
-
-        const idx = ((py - oy) * CQ + (px - ox)) * 4;
-        writeNeonPixel(data, idx, tIn);
+    // Per-pixel: read the static geometry maps (radial depth tIn and nearest
+    // arc-sample index j — both pure geometry, precomputed in deriveGeometry),
+    // load that sample's profile, and composite. No per-pixel atan2/sqrt: the
+    // arc endpoints f = 0 / f = 1 already sit on exact end samples in the map,
+    // so the tile boundary columns still match the strips (see the map build).
+    const jMap = cornerJMap[kind];
+    const tInMap = cornerTInMap[kind];
+    let li = 0;
+    // Enable the corner-fill branch of writeNeonPixel for this tile's exterior
+    // pixels (no-op unless CORNER_FILL). Strips never set this, so they are
+    // untouched.
+    inCornerTile = true;
+    for (let ly = 0; ly < RIM; ly++) {
+      const py = py0 + ly;
+      for (let lx = 0; lx < RIM; lx++, li++) {
+        const j = jMap[li];
+        if (j < 0) continue; // past the outward feather — nothing to write
+        np.Ac = lutAc[j]; np.coreDen = lutCoreDen[j]; np.Ab = lutAb[j];
+        np.bloomDenIn = lutBloomIn[j]; np.bloomDenOut = lutBloomOut[j];
+        np.r = lutR[j]; np.g = lutG[j]; np.b = lutB[j]; np.env = lutEnv[j];
+        // idx = (ly·CQ + lx)·4 = li·4 since CQ = RIM and px0/py0 = ox/oy.
+        writeNeonPixel(data, li << 2, tInMap[li], px0 + lx, py);
       }
     }
+    inCornerTile = false;
     buf.cx.putImageData(buf.img, 0, 0);
   };
 
@@ -1779,6 +2099,7 @@ export function createAuraEngine(
 
     frameIntensity = intensity * renderRingAlpha;
     perimeter = Math.max(1, 2 * LT + 2 * LH + 4 * ARC);
+    thetaScale = TWO_PI / perimeter;
 
     // Organic motion (C4), computed once per frame — one sin for the hue
     // drift, plus the crest placement for the highlight. Both stay exactly
@@ -2124,6 +2445,16 @@ export function createAuraEngine(
       const { w, h } = computeSize();
       canvas.width  = w;
       canvas.height = h;
+      // Re-derive geometry BEFORE allocBuffers so the ring harmonics (streamK*)
+      // track the new perimeter. Without this, θ = 2π·s/perimeter uses the live
+      // perimeter while k stays fixed, so the undulation wavelength (= per/k)
+      // would scale with the viewport and coarsen permanently on the primary
+      // (React window-resize) path, which never calls updateOptions({geometry}).
+      // deriveGeometry is idempotent for the geo-option consts (RIM/BAND/ARC are
+      // option-driven) and re-reads window size for `per`; this restores the
+      // pre-v0.4 resize-invariant feature size while keeping the field periodic.
+      // A resize may thus visibly re-seed the spatial pattern — acceptable.
+      deriveGeometry();
       allocBuffers();
       ctx.clearRect(0, 0, w, h);
     },
