@@ -49,6 +49,7 @@
     "check:dist": "node scripts/check-dist.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
+    "bench": "vitest bench --run",
     "prepublishOnly": "npm run typecheck && npm run build && npm run check:dist"
   },
   "peerDependencies": {

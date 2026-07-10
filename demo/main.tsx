@@ -556,7 +556,8 @@ function Demo() {
 
         <footer className="site-footer">
           <a href={AUTHOR_URL} target="_blank" rel="noreferrer noopener">
-            {t.madeBy}
+            <span className="made-by-prefix">{t.madeBy}</span>{" "}
+            <span className="made-by-name">Takuya Jodai</span>
           </a>
           <a href={REPO_URL} target="_blank" rel="noreferrer noopener">
             <GitHubIcon />

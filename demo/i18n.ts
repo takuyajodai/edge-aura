@@ -76,7 +76,7 @@ const en: Dict = {
   toLight: "Switch to light theme",
   github: "View edge-aura on GitHub",
 
-  heroSubtitle: "An organic glow that hugs the edges of your screen.",
+  heroSubtitle: "An organic glow that hugs the edge of your screen.",
   copy: "Copy",
   copied: "Copied",
 
@@ -122,7 +122,7 @@ const en: Dict = {
   usageReadme: "See the README for the full API.",
   readmeLink: "README",
 
-  madeBy: "Made by Takuya Jodai",
+  madeBy: "Made by",
   repo: "GitHub repository",
 };
 
@@ -179,7 +179,7 @@ const ja: Dict = {
   usageReadme: "完全な API は README をご覧ください。",
   readmeLink: "README",
 
-  madeBy: "Made by Takuya Jodai",
+  madeBy: "Made by",
   repo: "GitHub リポジトリ",
 };
 

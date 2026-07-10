@@ -5,6 +5,7 @@
 
 import {
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type KeyboardEvent,
@@ -81,7 +82,124 @@ export function SegmentedControl<T extends string>({
   ariaLabel: string;
   size?: "sm" | "md";
 }) {
+  const groupRef = useRef<HTMLDivElement>(null);
+  const pillRef = useRef<HTMLSpanElement>(null);
   const refs = useRef<(HTMLButtonElement | null)[]>([]);
+  const ready = useRef(false);
+  const prevValue = useRef(value);
+
+  // FLIP-style placement: measure the active button within the group and drive
+  // the pill's transform + size to match. `animate: false` snaps instantly (for
+  // initial mount, label/size changes, and container resize) by suppressing the
+  // CSS transition for the write; `true` lets the pill glide (selection).
+  const place = (animate: boolean) => {
+    const pill = pillRef.current;
+    if (!pill) return;
+    const i = options.findIndex((o) => o.value === value);
+    const btn = refs.current[i];
+    if (!btn) return;
+    if (!animate) pill.style.transition = "none";
+    pill.style.width = `${btn.offsetWidth}px`;
+    pill.style.height = `${btn.offsetHeight}px`;
+    pill.style.transform = `translate(${btn.offsetLeft}px, ${btn.offsetTop}px)`;
+    if (!animate) {
+      void pill.offsetWidth; // flush the instant write before restoring transition
+      pill.style.transition = "";
+    }
+  };
+
+  // Keep a live ref so the ResizeObserver (created once) always sees the current
+  // value/options rather than the closure captured at mount.
+  const placeRef = useRef(place);
+  placeRef.current = place;
+
+  // -- Horizontal-scroll affordances --------------------------------------
+  // On narrow widths the group is a one-row horizontal scroller. Toggle the
+  // edge-fade masks (data-fade-left/right) from the live scroll position: a
+  // fade shows only when there is more content in that direction. When
+  // everything fits (scrollWidth <= clientWidth) both stay off, so desktop and
+  // the header language toggle never show a fade.
+  const syncFades = () => {
+    const el = groupRef.current;
+    if (!el) return;
+    const max = el.scrollWidth - el.clientWidth;
+    // 1px slack absorbs sub-pixel rounding so the fade doesn't flicker at rest.
+    el.dataset.fadeLeft = String(el.scrollLeft > 1);
+    el.dataset.fadeRight = String(el.scrollLeft < max - 1);
+  };
+  const syncFadesRef = useRef(syncFades);
+  syncFadesRef.current = syncFades;
+
+  // Bring the selected item into the scroller's horizontal viewport. `inline`
+  // scrolls the .seg on the x-axis; `block: nearest` avoids a vertical page
+  // jump when the row is already visible. Callers pass "auto" on mount / under
+  // reduced motion, "smooth" for a selection glide.
+  const scrollSelectedIntoView = (behavior: ScrollBehavior) => {
+    const i = options.findIndex((o) => o.value === value);
+    refs.current[i]?.scrollIntoView({
+      inline: "nearest",
+      block: "nearest",
+      behavior,
+    });
+  };
+
+  const prefersReducedMotion = () =>
+    typeof matchMedia !== "undefined" &&
+    matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  // Instant placement on mount and whenever labels (language) or size change —
+  // positions jump, so a glide would look wrong. Enables transitions only AFTER
+  // the first placement so the pill never animates in from 0,0.
+  const optionsKey = options.map((o) => `${o.value} ${o.label}`).join("|");
+  useLayoutEffect(() => {
+    place(false);
+    if (!ready.current) {
+      ready.current = true;
+      pillRef.current?.setAttribute("data-ready", "true");
+      // First paint: snap the selected item into view (never a smooth glide, so
+      // the page never jumps) and seed the initial fade state.
+      scrollSelectedIntoView("auto");
+    }
+    // Label/language change alters item widths → re-evaluate overflow + fades.
+    syncFades();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [optionsKey, size]);
+
+  // Selection change (click or keyboard) → glide the pill to the new item.
+  useLayoutEffect(() => {
+    if (prevValue.current === value) return;
+    prevValue.current = value;
+    place(true);
+    // Keep the newly selected item in the horizontal viewport; the scroll event
+    // then refreshes the fades. Pill offsets are content-relative, so scrolling
+    // the container never invalidates the pill's placement.
+    scrollSelectedIntoView(prefersReducedMotion() ? "auto" : "smooth");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [value]);
+
+  // Re-measure on container resize / wrap without animating; refresh fades too
+  // (overflow can appear or disappear as the column width changes).
+  useEffect(() => {
+    const group = groupRef.current;
+    if (!group || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() => {
+      placeRef.current(false);
+      syncFadesRef.current();
+    });
+    ro.observe(group);
+    return () => ro.disconnect();
+  }, []);
+
+  // Refresh the edge fades as the row is scrolled. Bound once; reads the live
+  // syncFades via ref so it never captures a stale closure.
+  useEffect(() => {
+    const el = groupRef.current;
+    if (!el) return;
+    syncFadesRef.current();
+    const onScroll = () => syncFadesRef.current();
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => el.removeEventListener("scroll", onScroll);
+  }, []);
 
   const move = (dir: 1 | -1) => {
     const i = options.findIndex((o) => o.value === value);
@@ -116,7 +234,13 @@ export function SegmentedControl<T extends string>({
   };
 
   return (
-    <div className={`seg seg-${size}`} role="radiogroup" aria-label={ariaLabel}>
+    <div
+      ref={groupRef}
+      className={`seg seg-${size}`}
+      role="radiogroup"
+      aria-label={ariaLabel}
+    >
+      <span ref={pillRef} className="seg-pill" aria-hidden="true" />
       {options.map((o, i) => {
         const selected = o.value === value;
         return (
