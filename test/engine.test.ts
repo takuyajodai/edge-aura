@@ -355,13 +355,35 @@ describe("pixel snapshot", () => {
    * at the deep diagonal-cut depth. This changes light pixels near the four
    * corners; mid-edge columns remain byte-identical.
    *
+   * Regenerated for v0.4: four fold in. (1) The spatial noise field is now
+   * PERIODIC in the ring — every stream's spatial phase is an integer harmonic
+   * of the ring angle θ = 2π·s/perimeter, so the undulation flows continuously
+   * around the ring and is byte-identical across the s = 0 / perimeter closure.
+   * (2) The corner TILE renders that field LIVE per pixel again (no frozen
+   * arc-midpoint snapshot), and the strip diagonal crossfade is now deep-only
+   * (6-px window, no shallow tile-adjacency lift) — the near-corner pixels move.
+   * (3) The inner dissolve window is smoothstep(1 − x⁴) (C1, zero slope at the
+   * band edge) instead of the bare 1 − x⁴. (4) Mean-preserving ordered Bayer
+   * alpha dithering (offset in [0,1), floored) is added at quantization. All
+   * four move the default pixels by design.
+   *
+   * Regenerated again for the v0.4 corner perf pass: the corner tile no longer
+   * evaluates the 15-sin neonAt per pixel — it samples the SAME live periodic
+   * field at CORNER_ARC_SAMPLES points along the quarter arc and each pixel
+   * reuses the nearest sample across its radial depth (the strip discipline,
+   * for a curved path). The arc endpoints stay exact samples (tile↔strip
+   * boundaries unchanged), so only corner-interior pixels shift by the
+   * sub-LSB sample-quantization. Byte-identical reorders in the same pass
+   * (hoisting TWO_PI/perimeter and the Bayer load out of the hot loops) leave
+   * the pixels otherwise unchanged.
+   *
    * To regenerate after an INTENTIONAL default-appearance change: run this
    * test, copy the "received" hash from the failure output, and update the
    * constant. Any unintentional mismatch is a pixel regression in the default
    * rendering path.
    */
   const SNAPSHOT_SHA256 =
-    "e6bc2d181707ba95d0b23ba0a7f148e2b5ca40fbd43e42679d90e2e7beb70a02";
+    "32659ee642646576a06da41c2fe41e6c1a1ed64c88c1d477e94819f42e3c669c";
 
   it("matches the golden hash for the fixed 30-frame sequence", () => {
     const engine = mk({ seed: 42 });
@@ -391,9 +413,19 @@ describe("dark pixel snapshot", () => {
    * Regenerated for v0.3.1: two dark-only default bumps (coreWhiten 0.32 → 0.35,
    * darkChroma 1.15 → 1.25) plus the corner depth-crossfade (see the light
    * snapshot note) all fold into this hash.
+   *
+   * Regenerated for v0.4 with the light snapshot: periodic ring noise, the live
+   * corner tile + deep-only diagonal crossfade, the smoothstep(1 − x⁴) inner
+   * window, and mean-preserving ordered Bayer alpha dithering. The dither is
+   * especially visible here — the darkAlphaGamma response amplifies the faint
+   * tail, so breaking its 1/255 contours is exactly the dark-mode win.
+   *
+   * Regenerated again with the light snapshot for the corner arc-sample perf
+   * pass (see the light note): only corner-interior pixels shift by the sub-LSB
+   * arc-sample quantization; the rest of the pipeline is a byte-identical reorder.
    */
   const DARK_SNAPSHOT_SHA256 =
-    "464c26581c7c75b5eb2e78f2427c0635e3687abdaab0ad6aeff460bf7c5de816";
+    "c2efaa8cf3de4c8c0d531f0b6decd44b0c71fcaf6e435ee0eddbd92d4b10284c";
 
   it("matches the golden hash for the fixed dark 30-frame sequence", () => {
     const engine = mk({ seed: 42, palette: { background: "dark" } });
@@ -463,7 +495,27 @@ describe("corner rounding", () => {
   });
 });
 
-describe("corner-continuity seam (v0.3.1 depth crossfade)", () => {
+describe("corner-continuity seam (v0.4: live corner tile + deep-only diagonal crossfade)", () => {
+  // v0.4 restructure. The corner TILE now renders the periodic ring field LIVE
+  // per pixel (drawCorner does neonAt(s0 + f·ARC) again), so the undulation
+  // flows through the corner interior instead of freezing to a snapshot — that
+  // was the whole point of the v0.4 seamless work, and it is what these tests
+  // must not silently allow to regress.
+  //
+  // Two residual seams remain and are gated here:
+  //  • The 45° ownership DIAGONAL between two strips is an intrinsic
+  //    medial-axis discontinuity in the arc-position parameterization (the
+  //    nearest-centerline point branches there; the two owning strips sample
+  //    arc positions that diverge with depth). Periodicity does NOT remove it —
+  //    measured with the crossfade deleted it reaches 16–31/255 on dark — so a
+  //    MINIMAL deep-only crossfade to a shared per-corner midpoint profile is
+  //    retained, converging both owners exactly at the cut depth (≤ 2/255).
+  //  • The TL TILE BOUNDARY is the s = 0 / perimeter wrap side. The periodic
+  //    field is continuous across it and the tile + strips are both live there,
+  //    so the step stays small (≤ 3/255; ~2 of that is genuine live-field
+  //    variation across the ~1 px arc-end plus the ±0.5-LSB dither on each
+  //    side — no longer a frozen-snapshot match, so it cannot be driven to 0).
+  //
   // The stub viewport is 800×600 (installStubDom() default); the engine sizes
   // its canvas from window.innerWidth/Height.
   const VW = 800, VH = 600;
@@ -546,10 +598,15 @@ describe("corner-continuity seam (v0.3.1 depth crossfade)", () => {
     return m;
   };
 
-  // Fraction of adjacent near-corner column pairs that DIFFER at inner-bloom
-  // depths — a proxy for live per-column noise. The pre-fix whole-column freeze
-  // drove this to ~0 (the flat "interference" band); the depth crossfade keeps
-  // shallow depths live, so it rises to the natural mid-edge rate.
+  // Fraction of near-corner column pairs that DIFFER at inner-bloom depths — a
+  // proxy for live per-column noise (a frozen band would render every near-
+  // corner column identically → ~0). Columns are compared 8 APART (i vs i+8),
+  // not adjacent: the G2b ordered dither keys on (px&7, py&7), so 8-px-apart
+  // columns fall in the SAME Bayer cell and the dither cancels exactly — any
+  // surviving byte difference is real field variation, not dither. (Comparing
+  // adjacent columns would trivially "pass" from the 1-LSB dither alone,
+  // defeating the guard.) With the live field this sits near the natural
+  // mid-edge rate; a re-frozen corner would collapse it back toward 0.
   const nearCornerLiveness = (top: Uint8ClampedArray, W: number): number => {
     const topW = W - 2 * RIM;
     const rowStride = topW * 4;
@@ -557,7 +614,7 @@ describe("corner-continuity seam (v0.3.1 depth crossfade)", () => {
     for (let d = 8; d <= 30; d++) {
       for (let i = 12; i < 60; i++) {
         const a = d * rowStride + i * 4;
-        const b = d * rowStride + (i + 1) * 4;
+        const b = d * rowStride + (i + 8) * 4;
         const same =
           top[a] === top[b] && top[a + 1] === top[b + 1] &&
           top[a + 2] === top[b + 2] && top[a + 3] === top[b + 3];
@@ -595,11 +652,12 @@ describe("corner-continuity seam (v0.3.1 depth crossfade)", () => {
   );
 
   it.each([34, 76, 120])(
-    "keeps live per-column noise at shallow depths outside the tile-adjacent span (band %i)",
+    "keeps live per-column noise near the corners (band %i)",
     (band) => {
       const bufs = captureBuffers(settle(band));
-      // Well above the pre-fix frozen-band rate (~0.004); the natural mid-edge
-      // rate for this scene is ~0.23.
+      // Dither-cancelled metric (columns 8 apart): a re-frozen corner collapses
+      // this toward 0, the live periodic field keeps it well above the 0.05
+      // gate.
       expect(nearCornerLiveness(bufs[TILE.top], VW)).toBeGreaterThan(0.05);
     },
   );
