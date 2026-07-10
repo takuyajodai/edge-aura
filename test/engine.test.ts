@@ -522,70 +522,52 @@ describe("corner rounding", () => {
   });
 });
 
-describe("corner fill (opt-in): square-tube L-path distance field", () => {
-  // v0.4.1 rework. cornerFill no longer pastes a radial Gaussian blob over the
-  // rounded tube — it switches the corner tile's signed distance to the L-shaped
-  // sharp-corner centerline path (tIn = min(ax, ay) in the interior, −hypot in
-  // the exterior vertex quadrant) so the SAME tube flows straight through the
-  // 90° corner. The arc-sample index keeps the arc's angular parameterization
-  // (continuous, converging to the shared vertex/arc-midpoint profile on the
-  // diagonal), and the outward feather is disabled. These tests assert the
-  // integration: no seam at the tile boundaries, no discontinuity on the
-  // diagonal, a near-solid exterior, and a core that runs unbroken through the
-  // corner. The stub viewport is 800×600.
+describe("corner fill (opt-in): lit corner pocket, seamless with the rounded tube", () => {
+  // v3. cornerFill no longer switches the corner to a square L-path tube (which
+  // ignored cornerRadius — the rejected behaviour). The corner now renders
+  // through the EXACT SAME multi-source additive field as round mode — same
+  // centerline, same bend, same S1–S5 — so `cornerRadius` bends the tube with
+  // radius r identically. The ONLY differences (both keyed on CORNER_FILL, so
+  // round mode stays byte-identical): the outward feather is dropped and the
+  // arc's own outward Gaussian is allowed to reach across the exterior POCKET
+  // (out to the physical corner tip). The pocket is close to the wrapping arc
+  // and both straights' ends, so the additive sum lights it continuously from
+  // the tube (seamless at the arc by construction) and it decays toward the tip
+  // with the real distance field. These tests assert: the bend interior is
+  // byte-identical to round mode at the same CR, the pocket is lit and decays,
+  // the arc crossing carries no seam, and the tile/strip boundaries stay
+  // continuous. The stub viewport is 800×600.
   const W = 800, H = 600;
   const CORNERS = [TILE.TL, TILE.TR, TILE.BR, TILE.BL];
-  // Engine corner-kind flags, indexed by TILE corner (TL/TR/BR/BL).
-  const XNEG: Record<number, boolean> = { [TILE.TL]: true, [TILE.TR]: false, [TILE.BR]: false, [TILE.BL]: true };
-  const YNEG: Record<number, boolean> = { [TILE.TL]: true, [TILE.TR]: true, [TILE.BR]: false, [TILE.BL]: false };
   // Tile global origin (top-left) on the composited canvas.
   const ORIGIN: Record<number, [number, number]> = {
     [TILE.TL]: [0, 0], [TILE.TR]: [W - RIM, 0], [TILE.BR]: [W - RIM, H - RIM], [TILE.BL]: [0, H - RIM],
   };
 
-  // The fixed dark 30-frame golden sequence (tap + key), returning the 8 tiles.
-  const darkGolden = (options?: EdgeAuraOptions): Uint8ClampedArray[] => {
-    const engine = mk({ seed: 42, palette: { background: "dark" }, ...options });
+  // Fixed dark 12-frame settle (hueDrift off — a clean geometry probe), returning
+  // the 8 tiles for the requested cornerRadius / band / fill.
+  const settleTiles = (cr: number, band: number, fill: boolean): Uint8ClampedArray[] => {
+    const e = mk({
+      seed: 42, palette: { background: "dark" },
+      geometry: { band, cornerRadius: cr, cornerFill: fill }, motion: { hueDriftDeg: 0 },
+    });
     let bufs: Uint8ClampedArray[] = [];
-    for (let frame = 0; frame < 30; frame++) {
-      engine.step(16.7);
-      if (frame === 10) engine.tap({ x: 200, y: 300 });
-      if (frame === 15) engine.key(0.5);
-      bufs = captureBuffers(engine);
-    }
+    for (let f = 0; f < 12; f++) { e.step(16.7); bufs = captureBuffers(e); }
     return bufs;
   };
-  const fillGolden = (band: number) => darkGolden({ geometry: { band, cornerFill: true } });
-
-  // Alpha at global (gx, gy), dispatching to whichever pixel-disjoint tile owns
-  // it (4 corners + 4 strips), so seam pixels on either side of a tile boundary
-  // read from the same coordinate space. `band` = strip depth.
-  const alphaG = (bufs: Uint8ClampedArray[], gx: number, gy: number, band: number): number => {
-    const topW = W - 2 * RIM;
-    if (gx < RIM && gy < RIM) return bufs[TILE.TL][(gy * RIM + gx) * 4 + 3];
-    if (gx >= W - RIM && gy < RIM) return bufs[TILE.TR][(gy * RIM + (gx - (W - RIM))) * 4 + 3];
-    if (gx >= W - RIM && gy >= H - RIM) return bufs[TILE.BR][((gy - (H - RIM)) * RIM + (gx - (W - RIM))) * 4 + 3];
-    if (gx < RIM && gy >= H - RIM) return bufs[TILE.BL][((gy - (H - RIM)) * RIM + gx) * 4 + 3];
-    if (gy < band && gx >= RIM && gx < W - RIM) return bufs[TILE.top][(gy * topW + (gx - RIM)) * 4 + 3];
-    if (gy >= H - band && gx >= RIM && gx < W - RIM) return bufs[TILE.bottom][((gy - (H - band)) * topW + (gx - RIM)) * 4 + 3];
-    if (gx < band && gy >= RIM && gy < H - RIM) return bufs[TILE.left][((gy - RIM) * band + gx) * 4 + 3];
-    if (gx >= W - band && gy >= RIM && gy < H - RIM) return bufs[TILE.right][((gy - RIM) * band + (gx - (W - band))) * 4 + 3];
-    throw new Error(`no tile owns global (${gx}, ${gy})`);
+  // Alpha at TL tile-local (lx, ly) for a given RIM.
+  const aTL = (bufs: Uint8ClampedArray[], lx: number, ly: number, rim: number) =>
+    bufs[TILE.TL][(ly * rim + lx) * 4 + 3];
+  // Bilinear alpha in TL tile-local coords (clamped), for sub-pixel radial rays.
+  const bilTL = (bufs: Uint8ClampedArray[], rim: number) => (x: number, y: number): number => {
+    if (x < 0) x = 0; else if (x > rim - 1) x = rim - 1;
+    if (y < 0) y = 0; else if (y > rim - 1) y = rim - 1;
+    const x0 = Math.floor(x), y0 = Math.floor(y);
+    const x1 = Math.min(x0 + 1, rim - 1), y1 = Math.min(y0 + 1, rim - 1);
+    const fx = x - x0, fy = y - y0;
+    const A = (lx: number, ly: number) => bufs[TILE.TL][(ly * rim + lx) * 4 + 3];
+    return (A(x0, y0) * (1 - fx) + A(x1, y0) * fx) * (1 - fy) + (A(x0, y1) * (1 - fx) + A(x1, y1) * fx) * fy;
   };
-  const aTile = (bufs: Uint8ClampedArray[], kind: number, lx: number, ly: number) => bufs[kind][(ly * RIM + lx) * 4 + 3];
-
-  // L-path interior-positive perpendicular distances from the two centerlines
-  // (the engine's fill-mode metric): ax from the vertical edge, ay from the
-  // horizontal edge; tIn = min(ax, ay) interior, −hypot in the vertex quadrant.
-  const axay = (kind: number, lx: number, ly: number): [number, number] => {
-    const lcx = XNEG[kind] ? RIM : 0, lcy = YNEG[kind] ? RIM : 0;
-    const sx = XNEG[kind] ? 1 : -1, sy = YNEG[kind] ? 1 : -1;
-    return [CR + sx * (lx + 0.5 - lcx), CR + sy * (ly + 0.5 - lcy)];
-  };
-  // Diagonal MIRROR of a pixel (swaps ax↔ay → identical tIn, reflected across
-  // the medial-axis diagonal). Main diagonal for TL/BR, anti-diagonal for TR/BL.
-  const mirror = (kind: number, lx: number, ly: number): [number, number] =>
-    kind === TILE.TL || kind === TILE.BR ? [ly, lx] : [RIM - 1 - ly, RIM - 1 - lx];
 
   it("default off is byte-identical to omitting the option (light and dark)", () => {
     for (const bg of ["light", "dark"] as const) {
@@ -597,13 +579,12 @@ describe("corner fill (opt-in): square-tube L-path distance field", () => {
     }
   });
 
-  it("on: fills the square viewport-corner exterior where off leaves it transparent", () => {
-    const off = darkGolden();
-    const on = darkGolden({ geometry: { cornerFill: true } });
+  it("on: lights the square viewport-corner pocket where off leaves it transparent (all corners)", () => {
+    const off = settleTiles(CR, 76, false);
+    const on = settleTiles(CR, 76, true);
     for (const kind of CORNERS) {
-      // The physical screen-corner tip pixel (the outermost corner of the tile,
-      // in the exterior vertex quadrant) rounds off to transparent, but with the
-      // square tube it renders near-solid — the glow flows into the corner.
+      // The physical screen-corner tip pixel (outermost corner of the tile) rounds
+      // off to transparent in round mode; the lit pocket makes it glow.
       const [ox, oy] = ORIGIN[kind];
       const tx = ox === 0 ? 0 : RIM - 1;
       const ty = oy === 0 ? 0 : RIM - 1;
@@ -612,82 +593,58 @@ describe("corner fill (opt-in): square-tube L-path distance field", () => {
     }
   });
 
-  it("on: tile boundaries meet both adjacent strips within 6/255 (bands 34/76/120, dark)", () => {
-    // Each corner tile abuts a horizontal strip (top/bottom) across its vertical
-    // seam and a vertical strip (left/right) across its horizontal seam. In fill
-    // mode the interior L-path metric min(ax, ay) is EXACTLY the perpendicular
-    // depth the strips use, and the arc-sample endpoints match the strips' arc
-    // position, so both seams (screen edge → deepest interior) stay continuous.
-    // (≤ 6/255: the additive round-mode rework deleted the shared deep
-    // depth-crossfade that fill also used, so fill's near-corner strips are now
-    // pure single-source — meeting the tile 1/255 looser than before, still
-    // sub-perceptual and with no crossfade to freeze the undulation.)
-    for (const band of [34, 76, 120]) {
-      const on = fillGolden(band);
-      let worst = 0;
-      for (const kind of CORNERS) {
-        const [ox, oy] = ORIGIN[kind];
-        const onLeft = ox === 0;   // tile on the left half → horiz strip to the right
-        const onTop = oy === 0;    // tile on the top half → vert strip below
-        const tileGx = onLeft ? ox + RIM - 1 : ox;
-        const stripGx = onLeft ? ox + RIM : ox - 1;
-        for (let gy = oy; gy < oy + RIM; gy++)
-          worst = Math.max(worst, Math.abs(alphaG(on, tileGx, gy, band) - alphaG(on, stripGx, gy, band)));
-        const tileGy = onTop ? oy + RIM - 1 : oy;
-        const stripGy = onTop ? oy + RIM : oy - 1;
-        for (let gx = ox; gx < ox + RIM; gx++)
-          worst = Math.max(worst, Math.abs(alphaG(on, gx, tileGy, band) - alphaG(on, gx, stripGy, band)));
+  // cornerRadius stays fully meaningful: the bend is round mode's bend, and the
+  // pocket scales with CR. Varying CR (a squarer 6, the default 11, a rounder 24)
+  // asserts (a) the interior contours are BYTE-IDENTICAL to round mode at the same
+  // CR (fill differs only in the pocket), (b) the pocket is lit and (c) decays
+  // toward the tip, and (d) crossing the arc adds no seam beyond round's gradient.
+  it.each([6, 11, 24])("on: bend keeps CR; pocket lit, decaying, seamless (CR %i, dark)", (cr) => {
+    const rim = INSET + cr;
+    const round = settleTiles(cr, 76, false);
+    const fill = settleTiles(cr, 76, true);
+    // Arc center in TL tile-local coords is (rim, rim); the wedge points at the tip.
+    // (a) interior (radial ≤ CR−1) byte-identical: the bend and its cornerRadius
+    //     are exactly round mode's — only the pocket differs.
+    let interiorMax = 0, interiorN = 0;
+    for (let ly = 0; ly < rim; ly++) for (let lx = 0; lx < rim; lx++) {
+      const radial = Math.hypot(lx + 0.5 - rim, ly + 0.5 - rim);
+      if (radial <= cr - 1) {
+        interiorMax = Math.max(interiorMax, Math.abs(aTL(fill, lx, ly, rim) - aTL(round, lx, ly, rim)));
+        interiorN++;
       }
-      expect(worst).toBeLessThanOrEqual(6);
     }
+    expect(interiorN).toBeGreaterThan(0);
+    expect(interiorMax).toBeLessThanOrEqual(1); // identical within the dither
+
+    // (b)+(c) pocket centroid (mid-diagonal between arc and tip) is lit, and the
+    // physical tip is lit but dimmer — the glow decays outward toward the tip.
+    const midOff = (cr / Math.SQRT2 + rim) / 2;
+    const mLx = Math.round(rim - midOff), mLy = Math.round(rim - midOff);
+    const centroid = aTL(fill, mLx, mLy, rim);
+    const tip = aTL(fill, 0, 0, rim);
+    expect(centroid).toBeGreaterThan(20); // pocket genuinely lit, not a faint edge
+    expect(tip).toBeGreaterThan(0);
+    expect(centroid).toBeGreaterThan(tip); // decays toward the corner tip
+
+    // (d) crossing the arc (radial = CR) along wedge rays: fill introduces no step
+    // beyond round's own radial gradient there (they share the identical interior,
+    // and the pocket is the arc's own outward Gaussian, C0 at the arc). Measured as
+    // the excess of fill's in→out straddle over round's at the same ray.
+    const fB = bilTL(fill, rim), rB = bilTL(round, rim);
+    let excess = 0;
+    for (let a = 182; a <= 268; a += 1) {
+      const ux = Math.cos((a * Math.PI) / 180), uy = Math.sin((a * Math.PI) / 180);
+      const px = (r: number) => rim + r * ux, py = (r: number) => rim + r * uy;
+      const fStep = Math.abs(fB(px(cr - 0.5), py(cr - 0.5)) - fB(px(cr + 0.5), py(cr + 0.5)));
+      const rStep = Math.abs(rB(px(cr - 0.5), py(cr - 0.5)) - rB(px(cr + 0.5), py(cr + 0.5)));
+      excess = Math.max(excess, fStep - rStep);
+    }
+    expect(excess).toBeLessThanOrEqual(2);
   });
 
-  it("on: the diagonal is seamless — no discontinuity, mirror asymmetry ≤ 6/255 (bands 34/76/120, dark)", () => {
-    // The medial-axis diagonal (ax == ay) is where the nearest centerline is
-    // ambiguous. The angular arc-sample parameterization is CONTINUOUS across it
-    // (it converges to the arc-midpoint profile on the diagonal), so there is no
-    // step. Two checks: (1) reflected pixels at EQUAL tIn (swap ax↔ay) differ
-    // only by the tube's own hue transition — a slope, not a jump; (2) the max
-    // adjacent-pixel step among pairs STRADDLING the diagonal is no larger than
-    // among all interior pairs, i.e. the diagonal adds no discontinuity (both are
-    // just the steep radial core gradient).
-    for (const band of [34, 76, 120]) {
-      const on = fillGolden(band);
-      let mirrorMax = 0, straddleMax = 0, generalMax = 0;
-      for (const kind of CORNERS) {
-        for (let ly = 0; ly < RIM; ly++) for (let lx = 0; lx < RIM; lx++) {
-          const [ax, ay] = axay(kind, lx, ly);
-          if (Math.min(ax, ay) <= 0.5) continue; // interior, off the centerline
-          // (1) equal-tIn reflection asymmetry, restricted to pixels near the
-          // diagonal (the crossing region).
-          if (Math.abs(ax - ay) <= 1.5) {
-            const [mx, my] = mirror(kind, lx, ly);
-            if (mx !== lx || my !== ly)
-              mirrorMax = Math.max(mirrorMax, Math.abs(aTile(on, kind, lx, ly) - aTile(on, kind, mx, my)));
-          }
-          // (2) adjacent-step comparison: straddling the diagonal vs all pairs.
-          for (const [nx, ny] of [[lx + 1, ly], [lx, ly + 1]] as const) {
-            if (nx >= RIM || ny >= RIM) continue;
-            const [ax1, ay1] = axay(kind, nx, ny);
-            if (Math.min(ax1, ay1) <= 0.5) continue;
-            const step = Math.abs(aTile(on, kind, lx, ly) - aTile(on, kind, nx, ny));
-            generalMax = Math.max(generalMax, step);
-            if (Math.sign(ax - ay) !== Math.sign(ax1 - ay1)) straddleMax = Math.max(straddleMax, step);
-          }
-        }
-      }
-      expect(mirrorMax).toBeLessThanOrEqual(6);
-      // No extra step at the diagonal: straddling pairs jump no more than the
-      // worst interior pair anywhere (the radial core gradient), so the diagonal
-      // is not a visible seam.
-      expect(straddleMax).toBeLessThanOrEqual(generalMax);
-    }
-  });
-
-  // Source-over composite of the 8 disjoint tiles into a W×H alpha grid (a=0
-  // never overwrites — matches the engine's drawImage compositing), so the
-  // near-corner strip TRIANGLES (RIM < diag < BAND) can be probed across the
-  // ownership diagonal in one coordinate space.
+  // Source-over composite of the 8 disjoint tiles into a W×H alpha grid (a=0 never
+  // overwrites — matches the engine's drawImage compositing), so the near-corner
+  // strip TRIANGLES and the tile boundaries can be probed in one coordinate space.
   const compositeAlpha = (bufs: Uint8ClampedArray[], band: number): Float64Array => {
     const G = new Float64Array(W * H);
     const put = (buf: Uint8ClampedArray, bw: number, bh: number, ox: number, oy: number) => {
@@ -712,24 +669,15 @@ describe("corner fill (opt-in): square-tube L-path distance field", () => {
   it.each([34, 76, 120])(
     "on: the near-corner STRIP triangles carry no diagonal seam (band %i, dark)",
     (band) => {
-      // Regression guard for the v0.4.2→v0.4.x rework: deleting the shared deep
-      // depth-crossfade and gating the additive replacement behind !CORNER_FILL
-      // left fill mode's near-corner strip triangles single-source, reopening the
-      // medial-axis diagonal ridge (measured straddle steps 13/22/28 at bands
-      // 34/76/120, excess +4/+15/+21 over the local gradient). The "diagonal is
-      // seamless" test above only scans the RIM×RIM corner TILE (aTile), never the
-      // RIM < diag < BAND strip triangles where the seam actually lives. Fill mode
-      // keeps its own deep crossfade (writeColumnBlend) there; assert on the
-      // COMPOSITE (ownership hands deep near-corner pixels to the perpendicular
-      // strip) that stepping ACROSS the 45° diagonal jumps no more than the local
-      // gradient just off it — i.e. the diagonal adds no discontinuity.
-      const A = compositeAlpha(fillGolden(band), band);
+      // Fill's near-corner strips render through the SAME additive field as the
+      // tile (writeColumnAdd), so stepping ACROSS the 45° diagonal jumps no more
+      // than the local gradient just off it — the diagonal adds no discontinuity.
+      const A = compositeAlpha(settleTiles(CR, band, true), band);
       const at = (x: number, y: number) => A[y * W + x];
       let straddle = 0, general = 0;
       const dHi = Math.min(band - 1, 130);
       for (let D = RIM; D <= dHi; D++) {
         const k = D - RIM;
-        // The four corners' 45° diagonals (TL main, others mirrored to it).
         const cs = [
           [RIM + k, RIM + k], [W - 1 - (RIM + k), RIM + k],
           [W - 1 - (RIM + k), H - 1 - (RIM + k)], [RIM + k, H - 1 - (RIM + k)],
@@ -739,54 +687,32 @@ describe("corner fill (opt-in): square-tube L-path distance field", () => {
           for (const dxo of [3, -3, 6, -6]) general = Math.max(general, Math.abs(at(x + dxo, y) - at(x + dxo, y + 1)));
         }
       }
-      // No extra step at the diagonal beyond the steep radial core gradient the
-      // strips already show just off it.
       expect(straddle).toBeLessThanOrEqual(general);
     },
   );
 
-  it("on: exterior vertex renders near-solid, matching the straights' outward margin (dark)", () => {
-    // The exterior vertex quadrant (both ax, ay < 0 → tIn = −hypot) keeps the
-    // flat centerline value (t = 0, no feather), so it renders near-solid — the
-    // same way a straight's outward margin (also t = 0, feather ≡ 1) reads. Also
-    // asserts every filled corner buffer stays finite and never over-opaque.
-    const on = fillGolden(76);
-    // Straight outward margin: the top strip's shallowest row (gy = 0, tIn=-2.5).
-    const margin: number[] = [];
-    for (let gx = RIM; gx < RIM + 60; gx++) margin.push(alphaG(on, gx, 0, 76));
-    const marginVal = margin.reduce((a, b) => a + b, 0) / margin.length;
-    let vMin = 255, vMax = 0;
-    for (const kind of CORNERS) {
-      expect(on[kind].every((v) => Number.isFinite(v) && v <= 255)).toBe(true);
-      for (let ly = 0; ly < RIM; ly++) for (let lx = 0; lx < RIM; lx++) {
-        const [ax, ay] = axay(kind, lx, ly);
-        if (ax < 0 && ay < 0) {
-          const v = aTile(on, kind, lx, ly);
-          vMin = Math.min(vMin, v); vMax = Math.max(vMax, v);
-        }
-      }
+  it.each([34, 76, 120])("on: tile↔strip boundaries carry no step beyond the local gradient (band %i, dark)", (band) => {
+    // The additive tile (feather off) and the additive near-corner strips evaluate
+    // the identical position-pure field — including the pocket, which both light
+    // the same way — so a boundary crossing carries only the local field gradient.
+    // (Same metric and bound as round mode's S5 tile↔strip test.)
+    const A = compositeAlpha(settleTiles(CR, band, true), band);
+    const at = (x: number, y: number) => A[y * W + x];
+    const excess = (tx: number, ty: number, sx: number, sy: number) => {
+      const dx = sx - tx, dy = sy - ty;
+      const cross = Math.abs(at(tx, ty) - at(sx, sy));
+      const tileInner = Math.abs(at(tx, ty) - at(tx - dx, ty - dy));
+      const stripInner = Math.abs(at(sx, sy) - at(sx + dx, sy + dy));
+      return cross - Math.max(tileInner, stripInner);
+    };
+    let worst = -999;
+    for (let k = 0; k < RIM; k++) {
+      worst = Math.max(worst, excess(RIM - 1, k, RIM, k), excess(RIM - 1, H - 1 - k, RIM, H - 1 - k));
+      worst = Math.max(worst, excess(W - RIM, k, W - RIM - 1, k), excess(W - RIM, H - 1 - k, W - RIM - 1, H - 1 - k));
+      worst = Math.max(worst, excess(k, RIM - 1, k, RIM), excess(W - 1 - k, RIM - 1, W - 1 - k, RIM));
+      worst = Math.max(worst, excess(k, H - RIM, k, H - RIM - 1), excess(W - 1 - k, H - RIM, W - 1 - k, H - RIM - 1));
     }
-    expect(vMin).toBeGreaterThan(0); // genuinely near-solid, not transparent
-    expect(Math.abs(vMin - marginVal)).toBeLessThanOrEqual(2);
-    expect(Math.abs(vMax - marginVal)).toBeLessThanOrEqual(2);
-  });
-
-  it("on: the core line runs continuously through the corner — no dip > 3/255 (dark)", () => {
-    // The core line lives at the centerline (tIn ≈ 0.5). In fill mode it runs
-    // straight along each edge into the 90° corner (tIn stays ≈ 0.5 through the
-    // vertex junction), so the near-centerline alpha must not dip at the corner
-    // relative to a mid-edge strip column. Collect the tile's near-centerline
-    // pixels (both L arms) and the top strip's centerline, and bound the spread.
-    const on = fillGolden(76);
-    const core: number[] = [];
-    for (const kind of CORNERS)
-      for (let ly = 0; ly < RIM; ly++) for (let lx = 0; lx < RIM; lx++) {
-        const [ax, ay] = axay(kind, lx, ly);
-        if (Math.abs(Math.min(ax, ay) - 0.5) < 1e-6) core.push(aTile(on, kind, lx, ly));
-      }
-    for (let i = 0; i < 40; i++) core.push(alphaG(on, RIM + i, INSET, 76)); // strip centerline (tIn ≈ 0.5)
-    expect(core.length).toBeGreaterThan(0);
-    expect(Math.max(...core) - Math.min(...core)).toBeLessThanOrEqual(3);
+    expect(worst).toBeLessThanOrEqual(2);
   });
 
   it("is togglable live via updateOptions (matches a fresh cornerFill instance)", () => {
@@ -800,13 +726,55 @@ describe("corner fill (opt-in): square-tube L-path distance field", () => {
     engine.updateOptions({ geometry: { cornerFill: true } });
     // Equals a fresh instance created with cornerFill on, stepped the same.
     const fresh = mk({ seed: 42, geometry: { cornerFill: true } });
-    // engine already stepped once; step both to the same elapsed and compare.
     fresh.step(16.7);
     engine.step(16.7);
     fresh.step(16.7);
     expect(bytesEqual(captureFrame(engine), captureFrame(fresh))).toBe(true);
     const tipAfter = captureBuffers(engine)[TILE.TL][tipIdx];
-    expect(tipAfter).toBeGreaterThan(0); // corner now filled
+    expect(tipAfter).toBeGreaterThan(0); // pocket now lit
+  });
+
+  it("kindle / highlight / hueDrift compose into the pocket (not frozen)", () => {
+    // The pocket is lit by the same per-branch profiles as the interior, so the
+    // organic-motion options modulate it too. Each, toggled on, must move a small
+    // TL-pocket patch relative to the plain fill baseline.
+    const patch = (bufs: Uint8ClampedArray[]) => {
+      // Full RGBA of a 4×4 TL-pocket patch — hueDrift moves the COLOUR (not the
+      // alpha), so the channels must all be sampled.
+      const out: number[] = [];
+      for (let ly = 0; ly < 4; ly++) for (let lx = 0; lx < 4; lx++) {
+        const o = (ly * RIM + lx) * 4;
+        out.push(bufs[TILE.TL][o], bufs[TILE.TL][o + 1], bufs[TILE.TL][o + 2], bufs[TILE.TL][o + 3]);
+      }
+      return out;
+    };
+    const differs = (a: number[], b: number[]) => a.some((v, i) => v !== b[i]);
+    const fillOpts = (extra: EdgeAuraOptions["motion"]) =>
+      mk({ seed: 42, palette: { background: "dark" }, geometry: { cornerFill: true }, motion: { hueDriftDeg: 0, ...extra } });
+
+    // hueDrift on vs off, after enough frames for the drift to accumulate.
+    const base = fillOpts({});
+    const drift = fillOpts({ hueDriftDeg: 10 });
+    let baseB: Uint8ClampedArray[] = [], driftB: Uint8ClampedArray[] = [];
+    for (let f = 0; f < 20; f++) { base.step(16.7); drift.step(16.7); baseB = captureBuffers(base); driftB = captureBuffers(drift); }
+    expect(differs(patch(baseB), patch(driftB))).toBe(true);
+
+    // highlight: the travelling bloom crest sweeps the pocket too.
+    const hl = fillOpts({ highlight: { arcDeg: 60, periodS: 2, min: 0.2 } });
+    const plain = fillOpts({});
+    let hlB: Uint8ClampedArray[] = [], plB: Uint8ClampedArray[] = [];
+    for (let f = 0; f < 20; f++) { hl.step(16.7); plain.step(16.7); hlB = captureBuffers(hl); plB = captureBuffers(plain); }
+    expect(differs(patch(hlB), patch(plB))).toBe(true);
+
+    // kindle: a fresh reveal wavefront (from the far BR corner) leaves the TL
+    // pocket dark until it arrives, so a kindling frame differs from steady.
+    const k = fillOpts({});
+    k.step(16.7);
+    const before = patch(captureBuffers(k));
+    k.kindle(W - 1, H - 1);
+    k.step(16.7);
+    const after = patch(captureBuffers(k));
+    expect(differs(before, after)).toBe(true);
   });
 });
 

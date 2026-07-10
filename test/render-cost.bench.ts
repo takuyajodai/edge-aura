@@ -77,6 +77,50 @@ const measure = (c: Case, R = 60, BATCHES = 25, WARM = 5) => {
   return { baseMs: ma, liveMs: mb, deltaPct: (mb / ma - 1) * 100 };
 };
 
+// -- cornerFill (v3) overhead: fill mode vs round mode (both LIVE) -----------
+// Fill mode is opt-in and uses the SAME additive field as round mode; its only
+// extra cost is that the corner-tile pocket pixels — which round mode early-outs
+// or feathers to ~0 — now run the arc's outward Gaussian and get written. That
+// is ~the square-corner pocket area per corner (≈ RIM² − πCR²/4). Interleaved
+// round-live vs fill-live at the requested bands (window 800×600, dark). No hard
+// budget — fill is opt-in; these are honest numbers.
+const buildFill = (band: number, fill: boolean) => {
+  win.window.innerWidth = 800;
+  win.window.innerHeight = 600;
+  const e = createLive(newCanvas(), { seed: 42, geometry: { band, cornerFill: fill }, palette: { background: "dark" } });
+  for (let f = 0; f < 30; f++) e.step(16.7);
+  return e;
+};
+const measureFill = (band: number, R = 60, BATCHES = 25, WARM = 5) => {
+  const round = buildFill(band, false);
+  const fill = buildFill(band, true);
+  const runN = (e: { step(dt: number): void; render(): void }, n: number) => {
+    const t0 = performance.now();
+    for (let i = 0; i < n; i++) { e.step(16.7); e.render(); }
+    return performance.now() - t0;
+  };
+  const rT: number[] = [], fT: number[] = [];
+  for (let batch = 0; batch < BATCHES; batch++) {
+    const r = runN(round, R);
+    const f = runN(fill, R);
+    if (batch >= WARM) { rT.push(r / R); fT.push(f / R); }
+  }
+  const mr = median(rT), mf = median(fT);
+  return { roundMs: mr, fillMs: mf, deltaPct: (mf / mr - 1) * 100 };
+};
+/* eslint-disable no-console */
+console.log("\n=== cornerFill overhead: fill mode vs round mode (interleaved, per-frame median, 800x600 dark) ===");
+console.log("band     round(ms)  fill(ms)   delta");
+for (const band of [34, 76, 120]) {
+  const r = measureFill(band);
+  console.log(
+    `${String(band).padEnd(8)} ${r.roundMs.toFixed(3).padStart(8)} ${r.fillMs.toFixed(3).padStart(9)} ` +
+    `${(r.deltaPct >= 0 ? "+" : "") + r.deltaPct.toFixed(1) + "%"}`.padStart(9),
+  );
+}
+console.log("");
+/* eslint-enable no-console */
+
 // vitest bench executes this file during collection; print the authoritative
 // interleaved table here. The single registered bench below is a placeholder so
 // `vitest bench` has a benchmark to run (the table above is the real result).

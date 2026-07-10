@@ -133,21 +133,22 @@ export interface EdgeAuraGeometryOptions {
   innerSoftVar?: number;
   innerSigmaMax?: number;
   /**
-   * Render the ring as a SQUARE tube — the glow flows through the corner and
-   * fills it — instead of rounding off (default false). With the default
-   * rounding, the corner-exterior region (pixels past the arc, out to the
-   * physical square corner) fades to transparent via the outward feather,
-   * giving a beam-style rounded ring. Set true to instead route the SAME tube
-   * straight through a 90° corner: the corner tile's signed distance switches
-   * from the arc's radial metric to the L-shaped sharp-corner centerline path
-   * (perpendicular distance to the nearer straight centerline in the interior,
-   * distance to the corner vertex in the exterior quadrant). The core line runs
-   * crisp into the corner, the bloom fills the interior diagonal with the strips'
-   * own perpendicular metric (C0-continuous with both adjacent strips at the
-   * tile boundaries), and the exterior vertex region renders near-solid exactly
-   * like the straights' outward margin — one distance field, no pasted-on blob,
-   * no feather. `cornerRadius` still shapes the tiles and the arc-length
-   * bookkeeping, but the RENDERED corner is square regardless of CR. Togglable
+   * Fills the square viewport corners with light continuous with the rounded
+   * tube — the bend keeps its `cornerRadius`; the pocket beyond the arc glows
+   * and decays toward the corner tip (default false). With the default rounding,
+   * the corner-exterior region (pixels past the arc, out to the physical square
+   * corner) fades to transparent via the outward feather, giving a beam-style
+   * rounded ring. Set true to instead light that exterior POCKET: the corner
+   * still renders through the EXACT SAME multi-source additive field as round
+   * mode — same centerline, same bend, same S1–S5 behaviour, so `cornerRadius`
+   * bends the tube with radius r identically to round mode — but the outward
+   * feather is dropped and the arc's own outward Gaussian is allowed to reach
+   * across the pocket. The pocket is geometrically close to the wrapping arc and
+   * to both straights' ends, so the additive sum lights it brightly and
+   * continuously from the tube (seamless at the arc by construction — the same
+   * field, no boundary) and its luminance decays toward the physical corner tip
+   * with the real distance field. Larger CR → a rounder bend and a smaller,
+   * brighter pocket; smaller CR → a squarer bend and a larger pocket. Togglable
    * live via updateOptions.
    */
   cornerFill?: boolean;
@@ -617,33 +618,27 @@ const SPRING_EPS = 0.001;
 // never exceeds INSET, so the feather is inert there (see writeNeonPixel).
 const CORNER_FEATHER_PX = 1.5;
 
-// Depth (px) over which a near-corner strip column crossfades — WITH DEPTH, not
-// across columns — from its own live profile to the shared corner-midpoint
-// profile. Used ONLY by cornerFill (square-tube) mode: the round-mode additive
-// model below is intrinsically seamless and needs no crossfade, but the L-path
-// square tube still branches its arc-position parameterization along each 45°
-// corner diagonal (the two owning strips sample arc positions ~2·depth apart),
-// which — measured with this crossfade removed — reopens a 14–30/255 medial-axis
-// ridge on dark. The window completes (weight 1) exactly at the diagonal-cut
-// depth where the two owners meet and must agree; shallower pixels keep the
-// column's own live noise, so the bright core/bloom never freezes into a flat
-// band. See the corner-continuity block (snapCornerProfiles / writeColumnBlend).
-const CORNER_DEPTH_FADE_PX = 6;
-
 // -- Multi-source additive corner light model (v0.4.2) ----------------------
-// Round-mode corners are no longer rendered from the single NEAREST path point.
-// Every pixel in a corner neighbourhood sums the geometric coverage of the
-// THREE branches of the bent tube — the two adjacent straights (each with its
-// own live per-column/row profile) and the arc — clamped to 1 BEFORE the
-// intensity / dark-gamma / dither stages (aGeom = min(1, Σ aGeom_i)), with
-// colours combined energy-weighted. Away from a corner exactly one branch is
-// non-negligible, so the model degenerates to the single-source strip and the
-// mid-edge output is bit-identical; near the medial diagonal both straights
-// contribute similarly, so the sum is smooth by symmetry (no seam — S5), each
-// branch keeps its own live noise (undulation survives at depth — S4), and the
-// bend interior is brighter because it is close to more of the tube (S3). This
-// replaces the deep depth-crossfade concealment (deleted): the additive field
-// is a pure function of position, so ownership boundaries carry no step.
+// Corners are no longer rendered from the single NEAREST path point. Every pixel
+// in a corner neighbourhood sums the geometric coverage of the THREE branches of
+// the bent tube — the two adjacent straights (each with its own live per-column/
+// row profile) and the arc — combined by the p=3 norm before the intensity /
+// dark-gamma / dither stages, with colours combined energy-weighted. Away from a
+// corner exactly one branch is non-negligible, so the model degenerates to the
+// single-source strip and the mid-edge output is bit-identical; near the medial
+// diagonal both straights contribute similarly, so the sum is smooth by symmetry
+// (no seam — S5), each branch keeps its own live noise (undulation survives at
+// depth — S4), and the bend interior is brighter because it is close to more of
+// the tube (S3). The additive field is a pure function of position, so ownership
+// boundaries carry no step.
+//
+// cornerFill (opt-in) renders the SAME field with two differences, both keyed on
+// CORNER_FILL so round mode stays byte-identical: (1) the outward feather that
+// rounds the tile silhouette off past the arc is dropped, and (2) the arc branch
+// is allowed to reach across the exterior POCKET (out to POCKET_ARC_FLOOR, deep
+// enough to touch the physical corner tip) with its OUTWARD GAUSSIAN — so the
+// pocket glows continuously from the tube and decays toward the tip. Everything
+// else — centerline, bend, interior, S1–S5 — is identical to round mode.
 //
 // LONG_FADE (below) is the px over which a straight branch's contribution is
 // windowed off PAST its segment endpoint, as the tube bends into the arc — so a
@@ -987,29 +982,11 @@ export function createAuraEngine(
   // arc endpoints f = 0 / f = 1 are always exact samples, so the tile↔strip
   // boundary columns evaluate the same s as the strips; interior samples are
   // spaced ≤ ~½ px of OUTER arc apart (see deriveGeometry), sub-LSB on alpha.
-  // FILL mode (cornerFill) still renders its tile single-source through these
-  // lut* scratch arrays + writeNeonPixel (drawCorner); the ROUND additive path
-  // reads its arc profiles from cornerArcProf instead (snapCornerSources).
+  // Both modes read their per-frame arc profiles from cornerArcProf
+  // (snapCornerSources); CORNER_ARC_SAMPLES is the quarter-arc sample count.
   let CORNER_ARC_SAMPLES = 0;
-  let lutAc = new Float32Array(0);
-  let lutCoreDen = new Float32Array(0);
-  let lutAb = new Float32Array(0);
-  let lutBloomIn = new Float32Array(0);
-  let lutBloomOut = new Float32Array(0);
-  let lutR = new Float32Array(0);
-  let lutG = new Float32Array(0);
-  let lutB = new Float32Array(0);
-  let lutEnv = new Float32Array(0);
 
-  // Per-corner static geometry maps for FILL mode (opt-in). Every fill-tile
-  // pixel's L-path signed distance (tIn) and its arc-sample index j are pure
-  // geometry (no time/input), hoisted here once per geometry derive. Indexed
-  // [kind][ly*RIM + lx]. Only built when cornerFill is on; the ROUND additive
-  // path uses the box maps below instead.
-  const cornerJMap: Int16Array[] = [new Int16Array(0), new Int16Array(0), new Int16Array(0), new Int16Array(0)];
-  const cornerTInMap: Float32Array[] = [new Float32Array(0), new Float32Array(0), new Float32Array(0), new Float32Array(0)];
-
-  // -- Additive corner model storage (ROUND mode) ---------------------------
+  // -- Additive corner model storage (both modes) ---------------------------
   // BS is the side (px) of each square corner neighbourhood box — one per
   // corner, anchored at the screen corner, sized to max(RIM, BAND) so it covers
   // both the near-corner strip triangles (BAND) and the RIM×RIM arc tile. NF is
@@ -1017,9 +994,15 @@ export function createAuraEngine(
   // bloomDenOut, r, g, b, env).
   const NF = 9;
   let BS = 0;
-  // Feather floor: an arc branch whose signed distance is below this is fully
-  // faded (contributes 0) — the early-out in addNeonPixel. = −(INSET+feather).
+  // Feather floor (round mode): an arc branch whose signed distance is below this
+  // is fully faded (contributes 0) — the early-out in addNeonPixel. Past it the
+  // outward feather is already exactly 0, so the cut is free. = −(INSET+feather).
   let ARC_FLOOR = 0;
+  // Pocket floor (fill mode): the arc's outward Gaussian is allowed to reach this
+  // deep on the exterior side, enough to cover the physical corner tip (the
+  // deepest outward point in the RIM×RIM tile, at aT = CR − RIM·√2). The pocket
+  // glow decays across it toward the tip — see addNeonPixel.
+  let POCKET_ARC_FLOOR = 0;
   // Longitudinal fade length (px) for a straight branch past its segment end.
   let LONG_FADE = 1;
 
@@ -1103,26 +1086,14 @@ export function createAuraEngine(
       streamK3[i] = Math.max(1, Math.round(0.39 * k1));
     }
 
-    // Corner arc-LUT resolution: ≥2 samples per px of the OUTER arc length
+    // Corner arc sample resolution: ≥2 samples per px of the OUTER arc length
     // (radius CR + INSET + feather), so nearest-sample lookup stays within ≤½ px
     // of arc of the exact per-pixel position at every lit radius — sub-LSB on
-    // alpha, including the sensitive shallow tile-boundary columns. Reallocated
-    // only when the count changes (geometry, not per frame).
+    // alpha, including the sensitive shallow tile-boundary columns.
     const outerR = CR + INSET + CORNER_FEATHER_PX;
     const ns = Math.max(2, Math.ceil(2 * HALF_PI * outerR) + 1);
     const nsSpan = ns - 1;
-    if (ns !== CORNER_ARC_SAMPLES) {
-      CORNER_ARC_SAMPLES = ns;
-      lutAc = new Float32Array(ns);
-      lutCoreDen = new Float32Array(ns);
-      lutAb = new Float32Array(ns);
-      lutBloomIn = new Float32Array(ns);
-      lutBloomOut = new Float32Array(ns);
-      lutR = new Float32Array(ns);
-      lutG = new Float32Array(ns);
-      lutB = new Float32Array(ns);
-      lutEnv = new Float32Array(ns);
-    }
+    CORNER_ARC_SAMPLES = ns;
 
     // Additive-model derived scalars (see the constant block near the top).
     // BS = the corner box side. It must cover BOTH consumers: the near-corner
@@ -1133,46 +1104,20 @@ export function createAuraEngine(
     // box smaller than the tile, and tile pixels past BS hit addNeonPixel's safety
     // clamp and smeared onto the BS−1 edge. LONG_FADE ≈ 1.5·CR: a straight branch
     // is ~half-on at the arc midpoint (feeds the bend interior — S3) and off by the
-    // far tangent (no convex over-light). ARC_FLOOR is the fully-faded arc cutoff.
+    // far tangent (no convex over-light). ARC_FLOOR is the round-mode fully-faded
+    // arc cutoff; POCKET_ARC_FLOOR lets fill mode's arc reach the corner tip (the
+    // deepest outward point in the tile is at aT = CR − RIM·√2), so the exterior
+    // pocket glows and decays toward the tip.
     BS = Math.max(1, RIM, BAND);
     LONG_FADE = Math.max(2, CR);
     ARC_FLOOR = -(INSET + CORNER_FEATHER_PX);
+    POCKET_ARC_FLOOR = CR - RIM * Math.SQRT2 - 1;
 
-    if (CORNER_FILL) {
-      // FILL mode: build the RIM×RIM L-path signed-distance + arc-index maps the
-      // single-source fill tile renders through (drawCorner). ax/ay are the
-      // interior-positive perpendicular distances from the two centerlines; tIn =
-      // −hypot in the exterior vertex quadrant, else min(ax, ay). The additive
-      // box maps are not used in fill mode.
-      const rim2 = RIM * RIM;
-      for (let kind = 0; kind < 4; kind++) {
-        const lcx = CORNER_X_NEG[kind] ? RIM : 0;
-        const lcy = CORNER_Y_NEG[kind] ? RIM : 0;
-        const thOff = CORNER_TH_OFFSET[kind];
-        const sx = CORNER_X_NEG[kind] ? 1 : -1;
-        const sy = CORNER_Y_NEG[kind] ? 1 : -1;
-        const jm = new Int16Array(rim2);
-        const tm = new Float32Array(rim2);
-        let li = 0;
-        for (let ly = 0; ly < RIM; ly++) {
-          for (let lx = 0; lx < RIM; lx++, li++) {
-            const dx = lx + 0.5 - lcx;
-            const dy = ly + 0.5 - lcy;
-            const ax = CR + sx * dx;
-            const ay = CR + sy * dy;
-            tm[li] = ax <= 0 && ay <= 0 ? -Math.hypot(ax, ay) : Math.min(ax, ay);
-            jm[li] = (clamp((Math.atan2(dy, dx) + thOff) / HALF_PI, 0, 1) * nsSpan + 0.5) | 0;
-          }
-        }
-        cornerJMap[kind] = jm;
-        cornerTInMap[kind] = tm;
-      }
-      return;
-    }
-
-    // ROUND mode: build the per-corner additive box maps + straight 1D geometry,
-    // and (re)allocate the per-frame live-profile stores. All values are pure
-    // geometry (no time/input), so they are hoisted here once per derive.
+    // Build the per-corner additive box maps + straight 1D geometry, and
+    // (re)allocate the per-frame live-profile stores. All values are pure
+    // geometry (no time/input), so they are hoisted here once per derive. FILL
+    // mode uses the SAME maps — it differs only inside addNeonPixel (pocket glow
+    // vs feather), so nothing here branches on CORNER_FILL.
     const bs2 = BS * BS;
     for (let kind = 0; kind < 4; kind++) {
       const xneg = CORNER_X_NEG[kind];
@@ -1681,7 +1626,22 @@ export function createAuraEngine(
     covOut = core + bloom;
   };
 
-  // Composite one ROUND-mode corner pixel by summing the two straight branches
+  // Fill-mode arc branch on the OUTWARD (pocket) side. evalCov clamps the profile
+  // to its flat centerline value past the edge (t → 0) and lets the outward
+  // feather carve the silhouette; the pocket has NO feather, so instead the arc's
+  // coverage must decay with the REAL outward signed distance — its own outward
+  // Gaussian — giving a glow that fades toward the physical corner tip. The
+  // interior side (tIn ≥ 0) is byte-identical to evalCov, so the tube and its
+  // bend are untouched and the aT = 0 tube edge stays seamless (both sides land
+  // on core = Ac, bloom = Ab there).
+  const evalCovArcOut = (tIn: number, prof: Float32Array, o: number): void => {
+    if (tIn >= 0) { evalCov(tIn, prof, o); return; }
+    const tt = tIn * tIn;
+    coreOut = tt < 40 ? prof[o] * Math.exp(-tt / prof[o + 1]) : 0;
+    covOut = coreOut + prof[o + 2] * Math.exp(-tt / prof[o + 4]);
+  };
+
+  // Composite one corner pixel by summing the two straight branches
   // and the arc branch (energy-weighted colour + env, whitened by total core).
   // (lx, ly) are box-local coords for corner `kind`; (px, py) global, for
   // dither. Straight branches carry a longitudinal window that fades them off
@@ -1690,14 +1650,15 @@ export function createAuraEngine(
   // BEFORE the intensity / dark-gamma / dither stages, so those are untouched.
   // Returns the pre-dither alpha.
   //
-  // applyFeather (the TILE only): the corner tile IS the arc section of the
-  // tube, so its outward silhouette is the arc's feather — applied as a final
-  // multiply on the alpha (after the dark gamma, exactly like the old
+  // applyFeather (ROUND mode, the TILE only): the corner tile IS the arc section
+  // of the tube, so its outward silhouette is the arc's feather — applied as a
+  // final multiply on the alpha (after the dark gamma, exactly like the old
   // single-source outwardFade) so the whole pixel, straights included, rounds
   // off smoothly to transparent past the arc. Inside the tube the feather is 1,
   // so the interior brightening (S3) and the tile↔strip boundary (feather 1
   // there) are untouched. Strips pass false: the owning straight IS the tube and
-  // never reaches the outward feather.
+  // never reaches the outward feather. FILL mode ignores applyFeather entirely
+  // (see the outwardFade block) — its lit pocket replaces the rounded silhouette.
   const addNeonPixel = (
     data: Uint8ClampedArray,
     idx: number,
@@ -1758,13 +1719,17 @@ export function createAuraEngine(
       }
     }
     // Arc branch: capsule signed distance to the arc curve (self-decaying into
-    // the interior, no window). Skipped once its bloom is negligible far outward
-    // (≤ ARC_FLOOR) or deep inward (≥ bandCut). The outward feather is deferred
-    // to the final alpha (below).
+    // the interior, no window). Skipped once it is negligible deep inward
+    // (≥ bandCut) or far outward. ROUND mode cuts at ARC_FLOOR (past it the
+    // outward feather below is already 0) and defers the feather to the final
+    // alpha. FILL mode has no feather: it lets the arc reach across the pocket to
+    // POCKET_ARC_FLOOR (the corner tip) via its OUTWARD Gaussian (evalCovArcOut),
+    // so the pocket glows and decays toward the tip. The interior side is
+    // identical in both modes.
     const aT = boxArcTIn[kind][ly * BS + lx];
-    if (aT > ARC_FLOOR && aT < bandCut) {
+    if (aT > (CORNER_FILL ? POCKET_ARC_FLOOR : ARC_FLOOR) && aT < bandCut) {
       const o = boxArcJ[kind][ly * BS + lx] * NF;
-      evalCov(aT, aProf, o);
+      if (CORNER_FILL) evalCovArcOut(aT, aProf, o); else evalCov(aT, aProf, o);
       const c = covOut;
       if (c > 0) {
         sumCov += c; sumP += c * c * c; if (c > domCov) domCov = c; sumCoreP += coreOut * coreOut * coreOut;
@@ -1774,10 +1739,12 @@ export function createAuraEngine(
     }
 
     if (sumCov <= 0) return 0; // empty pixel (avoid 1/sumCov div-by-zero)
-    // Outward feather (tile silhouette), applied post-gamma like the old
-    // single-source outwardFade: 1 inside the tube, ramping to 0 past the arc.
+    // Outward feather (ROUND-mode tile silhouette), applied post-gamma like the
+    // old single-source outwardFade: 1 inside the tube, ramping to 0 past the
+    // arc. FILL mode never feathers — the pocket is lit instead — so the whole
+    // block is skipped there (its outward-decayed arc carries the falloff).
     let outwardFade = 1;
-    if (applyFeather && aT < 0) {
+    if (!CORNER_FILL && applyFeather && aT < 0) {
       const aOut = -aT;
       if (aOut > INSET) outwardFade = 1 - smoothstep01((aOut - INSET) / CORNER_FEATHER_PX);
     }
@@ -1906,74 +1873,6 @@ export function createAuraEngine(
     }
   };
 
-  // -- cornerFill (square-tube) diagonal-seam crossfade ----------------------
-  // Round mode conceals the medial-axis diagonal with the additive model above.
-  // FILL mode's L-path square tube has no arc branch to sum, so it keeps the
-  // v0.4 deep-only depth-crossfade: once per frame snap each corner's arc-
-  // midpoint profile (the shared convergence target), then each near-corner
-  // strip column lerps its OWN live profile toward that target WITH DEPTH,
-  // reaching weight 1 exactly at its diagonal cut so both owning strips agree
-  // there and the ridge nulls; shallow pixels keep their live per-column noise.
-  // Only built/used when CORNER_FILL is on. np.env (kindle) is left unblended —
-  // it must keep sweeping per arc position and is already continuous.
-  interface CornerProfile {
-    Ac: number; coreDen: number; Ab: number; bloomDenOut: number;
-    sbIn: number; bloomDenIn: number; r: number; g: number; b: number;
-  }
-  const cornerNp: CornerProfile[] = [0, 1, 2, 3].map(() => ({
-    Ac: 0, coreDen: 0, Ab: 0, bloomDenOut: 0, sbIn: 0, bloomDenIn: 0, r: 0, g: 0, b: 0,
-  }));
-  // Scratch holding a column's OWN (live) profile so each depth can lerp between
-  // it and the shared corner profile.
-  const ownNp: CornerProfile = {
-    Ac: 0, coreDen: 0, Ab: 0, bloomDenOut: 0, sbIn: 0, bloomDenIn: 0, r: 0, g: 0, b: 0,
-  };
-
-  // Snap the four arc-midpoint profiles for this frame. Runs after
-  // resolveHotspots (neonAt reads hotEdge/hotTan) and before the strips draw.
-  const snapCornerProfiles = (W: number, H: number, arcS0: number[]) => {
-    const md = CR * Math.SQRT1_2; // arc-midpoint offset from the arc center
-    for (let kind = 0; kind < 4; kind++) {
-      const ccx = CORNER_X_NEG[kind] ? RIM : W - RIM;
-      const ccy = CORNER_Y_NEG[kind] ? RIM : H - RIM;
-      const mx = ccx + (CORNER_X_NEG[kind] ? -md : md);
-      const my = ccy + (CORNER_Y_NEG[kind] ? -md : md);
-      // Hotspot gating inherits the corner tile's f = 0.5 convention (edges[1]);
-      // both hotspot Gaussians are exponentially small this far from any edge
-      // hotspot, so the edge choice is only a tie-break.
-      const edgeId = CORNER_EDGES[kind][1];
-      const tan = edgeId === TOP || edgeId === BOTTOM ? mx : my;
-      neonAt(arcS0[CORNER_ARC_INDEX[kind]] + ARC / 2, edgeId, tan);
-      const p = cornerNp[kind];
-      p.Ac = np.Ac; p.coreDen = np.coreDen; p.Ab = np.Ab;
-      p.bloomDenOut = np.bloomDenOut; p.sbIn = np.sbIn; p.bloomDenIn = np.bloomDenIn;
-      p.r = np.r; p.g = np.g; p.b = np.b;
-    }
-  };
-
-  // Snapshot the current np (a column's own live profile) into ownNp.
-  const snapOwnNp = () => {
-    ownNp.Ac = np.Ac; ownNp.coreDen = np.coreDen; ownNp.Ab = np.Ab;
-    ownNp.bloomDenOut = np.bloomDenOut; ownNp.sbIn = np.sbIn; ownNp.bloomDenIn = np.bloomDenIn;
-    ownNp.r = np.r; ownNp.g = np.g; ownNp.b = np.b;
-  };
-
-  // Set np = lerp(ownNp, corner, w) for every field writeNeonPixel reads (np.env
-  // is deliberately left alone). sbIn and bloomDenIn lerp independently — sbIn
-  // only drives the integer column reach, so a mid-blend mismatch with 2·sbIn²
-  // is confined to a ±1 px cutoff of near-zero alpha.
-  const lerpNpToCorner = (p: CornerProfile, w: number) => {
-    np.Ac = ownNp.Ac + w * (p.Ac - ownNp.Ac);
-    np.coreDen = ownNp.coreDen + w * (p.coreDen - ownNp.coreDen);
-    np.Ab = ownNp.Ab + w * (p.Ab - ownNp.Ab);
-    np.bloomDenOut = ownNp.bloomDenOut + w * (p.bloomDenOut - ownNp.bloomDenOut);
-    np.sbIn = ownNp.sbIn + w * (p.sbIn - ownNp.sbIn);
-    np.bloomDenIn = ownNp.bloomDenIn + w * (p.bloomDenIn - ownNp.bloomDenIn);
-    np.r = ownNp.r + w * (p.r - ownNp.r);
-    np.g = ownNp.g + w * (p.g - ownNp.g);
-    np.b = ownNp.b + w * (p.b - ownNp.b);
-  };
-
   // Per-position neon profile parameters, written into np.  s is the
   // clockwise arc position (px) along the centerline path — drives palette +
   // noise phases so both stay continuous around corners; tan is the
@@ -2081,16 +1980,11 @@ export function createAuraEngine(
     }
   };
 
-  // True only while drawCorner writes a corner TILE's pixels; gates the
-  // opt-in corner fill (below) so it never touches strip pixels. Strips leave
-  // it false, so their outward region (|tIn| ≤ INSET − 0.5) is byte-identical.
-  let inCornerTile = false;
-
   // Shared per-pixel neon profile: core + bloom Gaussians from np, scaled by
   // frame intensity, core whitened toward 255.  tIn is the signed distance
   // to the centerline with INWARD POSITIVE on every segment (straights:
-  // depth − INSET; rounded corners: CR − radialDist; filled corners: the
-  // L-path SDF — see the corner-map build) — the bloom picks the wider,
+  // depth − INSET; corners are rendered additively via addNeonPixel, not here)
+  // — the bloom picks the wider,
   // slowly-breathing inward denominator on that side, which is what melts
   // the ring's inner face.  On the outward side (tIn < 0) the profile keeps
   // its flat centerline value (t = 0) — without it the Gaussian would fade
@@ -2101,16 +1995,8 @@ export function createAuraEngine(
   // INSET, min |tIn| = INSET − 0.5 at d = 0), so the feather is EXACTLY 1
   // there and those pixels are byte-identical to the pre-rounding renderer;
   // only ROUNDED corner tiles, whose square region extends past INSET, round
-  // off — ending ~INSET px beyond the arc, tangent to both screen edges.
-  //
-  // CORNER FILL (opt-in, corner tiles only): the ONLY difference is that the
-  // outward feather is DISABLED, so the profile is exactly the straights' —
-  // core + inward-tail bloom around a centerline — evaluated against the L-path
-  // signed distance that drawCorner passes in. The exterior (tIn < 0) keeps the
-  // flat centerline value (t = 0) with no feather, so the square corner renders
-  // near-solid, identical to the way a straight's outward margin (also t = 0,
-  // feather = 1) reads. There is no separate blob and no radial Gaussian: one
-  // distance field carries the tube straight through the 90° corner.
+  // off — this path only renders STRAIGHTS now (corners go through addNeonPixel),
+  // so the feather is inert here and left in place for the general contract.
   //
   // On dark backgrounds the geometric coverage is additionally pushed through
   // the darkAlphaLut response curve (pow(coverage, darkAlphaGamma)) before
@@ -2161,10 +2047,9 @@ export function createAuraEngine(
         bloom = np.Ab * Math.exp(-tt / np.bloomDenOut);
       }
       // Outward feather: flat to INSET px, then a CORNER_FEATHER_PX fade to 0.
-      // Exactly 1 for every straight-edge pixel (|tIn| ≤ INSET − 0.5). DISABLED
-      // in corner-fill tiles — there the square corner continues near-solid
-      // (the tube flows through) instead of rounding off.
-      if (tIn < 0 && !(CORNER_FILL && inCornerTile)) {
+      // Exactly 1 for every straight-edge pixel (|tIn| ≤ INSET − 0.5), so this is
+      // inert on the straights this path now renders — kept for the contract.
+      if (tIn < 0) {
         const aOut = -tIn;
         if (aOut > INSET) {
           outwardFade = 1 - smoothstep01((aOut - INSET) / CORNER_FEATHER_PX);
@@ -2244,39 +2129,6 @@ export function createAuraEngine(
     }
   };
 
-  // cornerFill near-corner variant: crossfade the column's OWN profile (already
-  // in np, snapshotted here) to the shared corner-midpoint profile WITH DEPTH.
-  // The ramp completes (weight 1) at the diagonal cut depth `diagCut` — the
-  // deepest pixel this column draws before the diagonal hands the rest to the
-  // adjacent strip — so both owners agree there and the seam nulls; shallower
-  // pixels stay on the live per-column profile. (px, py) thread the global
-  // dither coords exactly like writeColumn.
-  const writeColumnBlend = (
-    data: Uint8ClampedArray,
-    base: number,
-    strideBytes: number,
-    dEnd: number,
-    corner: CornerProfile,
-    diagCut: number,
-    pxCol: number,
-    pyCol: number,
-    pxStep: number,
-    pyStep: number,
-  ) => {
-    snapOwnNp();
-    const dLo = diagCut - 1 - CORNER_DEPTH_FADE_PX;
-    let idx = base;
-    let px = pxCol, py = pyCol;
-    // No early break: the crossfade makes alpha NON-monotonic in depth (the own
-    // bloom fades, then the corner profile rises to the shared cut value), so a
-    // dip below ε mid-crossfade does not mean the tail is done — breaking would
-    // clip the deep corner tail and re-open the ownership seam. dEnd bounds it.
-    for (let d = 0; d < dEnd; d++, idx += strideBytes, px += pxStep, py += pyStep) {
-      lerpNpToCorner(corner, smoothstep01((d - dLo) / CORNER_DEPTH_FADE_PX));
-      writeNeonPixel(data, idx, d + 0.5 - INSET, px, py);
-    }
-  };
-
   // Bloom reach (px from the screen edge) for the current inward sigma.
   // The rational tail stays visible to roughly 7σ (vs 3σ for a Gaussian);
   // the early-break in writeColumn trims whatever ends sooner.
@@ -2343,30 +2195,9 @@ export function createAuraEngine(
       const base = cfg.base0 + i * cfg.basePerI;
       const pxCol = cfg.pxAtI0 + i * cfg.pxPerI;
       const pyCol = cfg.pyAtI0 + i * cfg.pyPerI;
-      if (CORNER_FILL) {
-        // Square-tube: near-corner columns keep the DEEP depth-crossfade to the
-        // shared corner-midpoint profile (the additive arc model is round-only)
-        // so the L-path medial-axis diagonal seam nulls. np holds this column's
-        // own live profile first (snapCornerProfiles supplies the target).
-        neonAt(cfg.sBase + cfg.sDir * (g + 0.5), cfg.edgeId, g + 0.5);
-        if (diag < BAND) {
-          const corner = cornerNp[kind];
-          // Clip the deep tail by the CORNER profile's reach, not the column's
-          // own — adjacent columns owning the same corner must share one deepest
-          // drawn depth, else a ±1 px faint-tail mismatch reopens the boundary.
-          writeColumnBlend(
-            data, base, cfg.strideBytes, Math.min(reach(corner.sbIn), diag),
-            corner, diag, pxCol, pyCol, cfg.pxPerD, cfg.pyPerD,
-          );
-        } else {
-          writeColumn(
-            data, base, cfg.strideBytes, Math.min(reach(np.sbIn), diag),
-            pxCol, pyCol, cfg.pxPerD, cfg.pyPerD,
-          );
-        }
-      } else if (diag < BAND) {
-        // Near-corner (round): render additively from all three tube branches
-        // (arc + both straights). The field is a pure function of position, so
+      if (diag < BAND) {
+        // Near-corner: render additively from all three tube branches (arc + both
+        // straights) — BOTH modes. The field is a pure function of position, so
         // the two owning strips agree across the 45° diagonal with no crossfade;
         // dEnd = diag keeps the top/side ownership split disjoint (the deeper
         // pixels are the perpendicular strip's, computing the same value).
@@ -2436,10 +2267,8 @@ export function createAuraEngine(
   // straight edges (split at the arc midpoint f = 0.5).
   const drawCorner = (
     buf: Buf | null,
-    ox: number, oy: number,   // buffer placement on the main canvas
     ccx: number, ccy: number, // arc center (global)
     kind: number,             // 0 TL, 1 TR, 2 BR, 3 BL
-    arcS0: number[],
   ) => {
     if (!buf) return;
     const data = buf.img.data;
@@ -2447,72 +2276,31 @@ export function createAuraEngine(
     const px0 = CORNER_X_NEG[kind] ? ccx - RIM : ccx;
     const py0 = CORNER_Y_NEG[kind] ? ccy - RIM : ccy;
 
-    if (!CORNER_FILL) {
-      // ROUND mode: the tile is the arc corner of the additive box. Composite
-      // every tile pixel from the three branches via addNeonPixel (arc + both
-      // straights), reading the same per-frame profiles the near-corner strips
-      // use — so the tile↔strip boundaries and the 45° diagonal are seamless by
-      // construction. Box-local coords = global − the corner's box origin.
-      const ox = boxOx[kind];
-      const oy = boxOy[kind];
-      let li = 0;
-      for (let ly = 0; ly < RIM; ly++) {
-        const py = py0 + ly;
-        for (let lx = 0; lx < RIM; lx++, li++) {
-          const px = px0 + lx;
-          addNeonPixel(data, li << 2, kind, px - ox, py - oy, px, py, true);
-        }
-      }
-      buf.cx.putImageData(buf.img, 0, 0);
-      return;
-    }
-
-    // FILL mode (opt-in): single-source square-tube L-path tile, unchanged. Build
-    // the per-arc-sample profile LUT once, then each pixel reuses the nearest
-    // sample across its radial depth (the strip discipline for a curved path)
-    // with the L-path signed distance from cornerTInMap and the feather disabled.
-    const s0 = arcS0[CORNER_ARC_INDEX[kind]];
-    const thOff = CORNER_TH_OFFSET[kind];
-    const edges = CORNER_EDGES[kind];
-    const NS = CORNER_ARC_SAMPLES;
-    const nsSpan = NS - 1;
-    for (let j = 0; j < NS; j++) {
-      const f = j / nsSpan;
-      const edgeId = f < 0.5 ? edges[0] : edges[1];
-      const arcAngle = f * HALF_PI - thOff;
-      const apx = ccx + CR * Math.cos(arcAngle);
-      const apy = ccy + CR * Math.sin(arcAngle);
-      const tan = edgeId === TOP || edgeId === BOTTOM ? apx : apy;
-      neonAt(s0 + f * ARC, edgeId, tan);
-      lutAc[j] = np.Ac; lutCoreDen[j] = np.coreDen; lutAb[j] = np.Ab;
-      lutBloomIn[j] = np.bloomDenIn; lutBloomOut[j] = np.bloomDenOut;
-      lutR[j] = np.r; lutG[j] = np.g; lutB[j] = np.b; lutEnv[j] = np.env;
-    }
-    const jMap = cornerJMap[kind];
-    const tInMap = cornerTInMap[kind];
+    // The tile is the arc corner of the additive box. Composite every tile pixel
+    // from the three branches via addNeonPixel (arc + both straights), reading the
+    // same per-frame profiles the near-corner strips use — so the tile↔strip
+    // boundaries and the 45° diagonal are seamless by construction. Box-local
+    // coords = global − the corner's box origin. ROUND mode feathers the arc's
+    // outward silhouette off (applyFeather); FILL mode passes false, so the
+    // exterior pocket is lit by the arc's outward glow and decays toward the tip.
+    const bx = boxOx[kind];
+    const by = boxOy[kind];
     let li = 0;
-    inCornerTile = true;
     for (let ly = 0; ly < RIM; ly++) {
       const py = py0 + ly;
       for (let lx = 0; lx < RIM; lx++, li++) {
-        const j = jMap[li];
-        if (j < 0) continue; // past the outward feather — nothing to write
-        np.Ac = lutAc[j]; np.coreDen = lutCoreDen[j]; np.Ab = lutAb[j];
-        np.bloomDenIn = lutBloomIn[j]; np.bloomDenOut = lutBloomOut[j];
-        np.r = lutR[j]; np.g = lutG[j]; np.b = lutB[j]; np.env = lutEnv[j];
-        // idx = (ly·CQ + lx)·4 = li·4 since CQ = RIM and px0/py0 = ox/oy.
-        writeNeonPixel(data, li << 2, tInMap[li], px0 + lx, py);
+        const px = px0 + lx;
+        addNeonPixel(data, li << 2, kind, px - bx, py - by, px, py, !CORNER_FILL);
       }
     }
-    inCornerTile = false;
     buf.cx.putImageData(buf.img, 0, 0);
   };
 
-  const drawCorners = (W: number, H: number, arcS0: number[]) => {
-    drawCorner(cornerTL, 0,      0,      RIM,     RIM,     0, arcS0);
-    drawCorner(cornerTR, W - CQ, 0,      W - RIM, RIM,     1, arcS0);
-    drawCorner(cornerBR, W - CQ, H - CQ, W - RIM, H - RIM, 2, arcS0);
-    drawCorner(cornerBL, 0,      H - CQ, RIM,     H - RIM, 3, arcS0);
+  const drawCorners = (W: number, H: number) => {
+    drawCorner(cornerTL, RIM,     RIM,     0);
+    drawCorner(cornerTR, W - RIM, RIM,     1);
+    drawCorner(cornerBR, W - RIM, H - RIM, 2);
+    drawCorner(cornerBL, RIM,     H - RIM, 3);
   };
 
   // Composite: tiles are pixel-disjoint, so source-over never double-draws.
@@ -2569,13 +2357,11 @@ export function createAuraEngine(
 
     resolveHotspots(W, H);
     // Corner-source prep (after hotspots — neonAt reads hotEdge/hotTan — and
-    // before the strips + tiles that read it). Round mode fills the additive
-    // branch profiles; fill mode fills the crossfade's shared arc-midpoint
-    // targets (its tile renders single-source and reuses no additive profile).
-    if (CORNER_FILL) snapCornerProfiles(W, H, arcS0);
-    else snapCornerSources(W, H, sRight0, sBottom0, sLeft0, arcS0);
+    // before the strips + tiles that read it): fill the per-corner additive
+    // branch profiles (arc + both straights). BOTH modes use the same field.
+    snapCornerSources(W, H, sRight0, sBottom0, sLeft0, arcS0);
     drawStrips(W, H, sRight0, sBottom0, sLeft0);
-    drawCorners(W, H, arcS0);
+    drawCorners(W, H);
     composite(W, H);
 
     // Chrome-sampler guard: erase the topmost rows so browsers that tint
