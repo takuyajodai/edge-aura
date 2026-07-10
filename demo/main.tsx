@@ -163,6 +163,7 @@ function Demo() {
   const [palette, setPalette] = useState<EdgeAuraPaletteName>("opal");
   const [preset, setPreset] = useState<PresetChoice>("default");
   const [sliders, setSliders] = useState<Sliders>(() => slidersFromPreset("default"));
+  const [cornerFill, setCornerFill] = useState(false);
   const [active, setActive] = useState(true);
   const [typing, setTyping] = useState(false);
   const [savedAt, setSavedAt] = useState(0);
@@ -226,6 +227,7 @@ function Demo() {
   const selectPreset = (choice: PresetChoice) => {
     setPreset(choice);
     setSliders(slidersFromPreset(choice)); // reset sliders to the preset
+    setCornerFill(false); // reset to the engine default
   };
 
   const setSlider = <K extends keyof Sliders>(key: K, value: number) =>
@@ -259,6 +261,9 @@ function Demo() {
         band: sliders.band,
         cornerRadius: sliders.cornerRadius,
         inset: sliders.inset,
+        // Only set when true — the engine default is false, and the snippet
+        // generator should stay quiet unless this diverges from it.
+        ...(cornerFill ? { cornerFill: true } : {}),
       },
       // coreWhiten and normalizeTarget have BACKGROUND-DEPENDENT engine defaults
       // (a hotter core and the dark reference weight on "dark"). EDGE_AURA_DEFAULTS
@@ -286,7 +291,7 @@ function Demo() {
       },
       input: { ...D.input, ...base.input },
     };
-  }, [preset, sliders, theme]);
+  }, [preset, sliders, cornerFill, theme]);
 
   const snippet = useMemo(
     () => buildSnippet(options, palette, active),
@@ -297,6 +302,9 @@ function Demo() {
   const px = (v: number) => `${v}px`;
   const dec = (v: number) => v.toFixed(2);
   const deg = (v: number) => (v === 0 ? t.off : `${v}°`);
+  // The highlight arc is stored as degrees (engine API), but "80°" doesn't
+  // read intuitively — show it as the share of the ring it covers instead.
+  const arcPct = (v: number) => (v === 0 ? t.off : `${Math.round((v / 360) * 100)}%`);
   // Japanese attaches the unit directly to the digit (e.g. "8秒/回転"); English
   // keeps the conventional space ("8 s/turn").
   const idle = (v: number) =>
@@ -434,8 +442,19 @@ function Demo() {
               <SliderRow label={t.hueDrift} caption={t.hueDriftCaption} value={sliders.hueDriftDeg}
                 min={0} max={45} step={1} onChange={(v) => setSlider("hueDriftDeg", v)} format={deg} />
               <SliderRow label={t.highlight} caption={t.highlightCaption} value={sliders.highlightArcDeg}
-                min={0} max={140} step={5} onChange={(v) => setSlider("highlightArcDeg", v)} format={deg} />
+                min={0} max={140} step={5} onChange={(v) => setSlider("highlightArcDeg", v)} format={arcPct} />
             </div>
+
+            <ControlRow label={t.corners} caption={t.cornersCaption}>
+              <button
+                type="button"
+                className="btn"
+                aria-pressed={cornerFill}
+                onClick={() => setCornerFill((f) => !f)}
+              >
+                {cornerFill ? t.cornersFilled : t.cornersRounded}
+              </button>
+            </ControlRow>
 
             <div className="divider" />
 

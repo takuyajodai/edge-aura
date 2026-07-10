@@ -15,6 +15,7 @@
 
   --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
   --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --serif: "Fraunces", "Didot", "Bodoni MT", Georgia, serif;
 
   --dur: 180ms;
   --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
@@ -131,9 +132,10 @@ a {
 }
 
 .wordmark {
-  font-weight: var(--fw-semi);
-  font-size: 17px;
-  letter-spacing: -0.02em;
+  font-family: var(--serif);
+  font-weight: 600;
+  font-size: 19px;
+  letter-spacing: -0.01em;
   text-decoration: none;
   color: var(--text);
 }
@@ -193,9 +195,11 @@ a {
 }
 .hero-title {
   margin: 0;
+  font-family: var(--serif);
+  font-style: italic;
   font-size: clamp(44px, 12vw, 76px);
-  font-weight: 700;
-  letter-spacing: -0.045em;
+  font-weight: 600;
+  letter-spacing: -0.015em;
   line-height: 1;
 }
 .hero-sub {

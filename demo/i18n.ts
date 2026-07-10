@@ -45,6 +45,10 @@ export interface Dict {
   highlightCaption: string;
   off: string;
   idleUnit: string; // e.g. "s/turn"
+  corners: string; // label for the corner-fill toggle row
+  cornersCaption: string;
+  cornersRounded: string; // toggle button text when cornerFill is off
+  cornersFilled: string; // toggle button text when cornerFill is on
   actions: string; // muted label for the action row
   replay: string;
   pulse: string;
@@ -95,11 +99,15 @@ const en: Dict = {
   idleSpeed: "Idle speed",
   idleSpeedCaption: "How fast the glow drifts around the screen when idle.",
   hueDrift: "Hue drift",
-  hueDriftCaption: "Lets the glow's color wander slightly as it moves.",
+  hueDriftCaption: "Sway range on the hue wheel. 0° = fixed, 45° = broad drift.",
   highlight: "Highlight",
-  highlightCaption: "Adds a brighter, moving arc of light along the glow.",
+  highlightCaption: "How much of the ring the bright sweep covers. 0 = off.",
   off: "off",
   idleUnit: "s/turn",
+  corners: "Corners",
+  cornersCaption: "Round off, or fill the square corners with light.",
+  cornersRounded: "Rounded",
+  cornersFilled: "Filled",
   actions: "Actions",
   replay: "Replay entrance",
   pulse: "Pulse",
@@ -148,11 +156,15 @@ const ja: Dict = {
   idleSpeed: "回転の速さ",
   idleSpeedCaption: "待機中に光が一周する速さです",
   hueDrift: "色相のゆらぎ",
-  hueDriftCaption: "回転中に色相がゆっくり揺れ動く幅です",
+  hueDriftCaption: "色相環上の揺れ幅。0°で固定、45°で大きくうねる",
   highlight: "ハイライト",
-  highlightCaption: "光の帯に明るいハイライトの弧を加えます",
+  highlightCaption: "リングの何割を明るく照らすか。0でオフ",
   off: "オフ",
   idleUnit: "秒/回転",
+  corners: "角の処理",
+  cornersCaption: "丸めて消すか、四隅まで光で満たすか",
+  cornersRounded: "丸める",
+  cornersFilled: "埋める",
   actions: "操作",
   replay: "登場アニメを再生",
   pulse: "パルス",
