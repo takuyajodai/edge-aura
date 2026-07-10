@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-07-11
+
+### Changed
+
+- **Visual — bent-tube corners:** the corner neighborhood renders as light
+  from a physically bent tube (multi-source additive model: both adjacent
+  straights + the arc, p=3 norm with an explicit concentration ceiling).
+  The bend interior now glows slightly brighter than a straight section at
+  equal distance (as a real bent tube does), the organic undulation flows
+  through the bend at full amplitude (the deep frozen-crossfade zone is
+  gone), and all corner seams stay ≤ 2/255 by construction. Frame cost
+  +≈12% at the reference scene, up to +27% at extreme band/small
+  viewports (inherent to genuinely three-branch corner pixels; measured
+  with a new in-process A/B benchmark, `npm run bench`).
+- **Breaking — `cornerFill` v3:** fill mode now keeps the rounded bend
+  (`cornerRadius` fully meaningful) and lights the pocket beyond the arc
+  with the same additive field — seamless at the arc by construction, the
+  pocket decaying toward the corner tip. The 0.4.x square-tube (L-path)
+  fill look is gone. Fill overhead vs round: +1–3% (opt-in).
+- **Breaking — palettes pruned to 7:** new `ember` (molten crimson→
+  white-hot flare; dramatic on dark) and `ultraviolet` (electric violet
+  synthwave); removed `spectrum` (legacy rainbow), `candy` (overlapped
+  sakura) and `nebula` (superseded by ultraviolet).
+- Demo: sliding-pill segmented controls (240 ms, gentle overshoot,
+  keyboard/wrap/reduced-motion safe); segmented rows stay on one line on
+  mobile via hidden-scrollbar horizontal scroll with edge-fade
+  affordances; hero subtitle fits one line at desktop ("edge of your
+  screen"); beam-style footer attribution; optically balanced copy-button
+  padding.
+
 ## [0.4.1] - 2026-07-11
 
 ### Changed
