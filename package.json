@@ -1,6 +1,6 @@
 {
   "name": "edge-aura",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "Organic screen-edge glow — framework-agnostic Canvas 2D engine with spring physics, palette LUT, and a thin React adapter.",
   "keywords": [
     "glow",
@@ -49,6 +49,7 @@
     "check:dist": "node scripts/check-dist.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
+    "bench": "vitest bench --run",
     "prepublishOnly": "npm run typecheck && npm run build && npm run check:dist"
   },
   "peerDependencies": {

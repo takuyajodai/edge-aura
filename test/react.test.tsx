@@ -194,9 +194,9 @@ describe("palette prop", () => {
     rerender(<EdgeAura palette="ocean" />); // same value — no call
     expect(mockEngine.setPalette).not.toHaveBeenCalled();
 
-    rerender(<EdgeAura palette="nebula" />);
+    rerender(<EdgeAura palette="ember" />);
     expect(mockEngine.setPalette).toHaveBeenCalledTimes(1);
-    expect(mockEngine.setPalette).toHaveBeenCalledWith("nebula", { crossfadeMs: 350 });
+    expect(mockEngine.setPalette).toHaveBeenCalledWith("ember", { crossfadeMs: 350 });
     expect(createAuraEngine).toHaveBeenCalledTimes(1); // no remount for palette
   });
 
@@ -208,9 +208,9 @@ describe("palette prop", () => {
     const { rerender } = render(<EdgeAura palette="ocean" />);
     expect(mockEngine.renderStatic).toHaveBeenCalledTimes(1); // mount frame
 
-    rerender(<EdgeAura palette="nebula" />);
+    rerender(<EdgeAura palette="ember" />);
     expect(mockEngine.setPalette).toHaveBeenCalledTimes(1);
-    expect(mockEngine.setPalette).toHaveBeenCalledWith("nebula"); // no crossfade
+    expect(mockEngine.setPalette).toHaveBeenCalledWith("ember"); // no crossfade
     expect(mockEngine.renderStatic).toHaveBeenCalledTimes(2); // repainted
     expect(pendingRaf.size).toBe(0); // still no loop
   });

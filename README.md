@@ -162,13 +162,12 @@ const engine = createAuraEngine(canvas, {
 | Preset | Character |
 |---|---|
 | `opal` | Organic mesh gradient — non-uniform stops, warm knot into a cool exhale — the default |
-| `spectrum` | Full-spectrum rainbow cycle — the loudest option |
 | `aurora` | Cool tones only: emerald / near-white / ice cyan / sky blue |
 | `sunset` | Warm dusk oranges and magentas |
 | `ocean` | Deep blues and teals |
-| `candy` | Bright playful pinks and blues |
-| `nebula` | Dark saturated purples and blues |
 | `sakura` | Cherry-blossom pinks alternating with near-white blush |
+| `ember` | Molten furnace — deep crimson through a white-hot flare into maroon; dramatic on dark |
+| `ultraviolet` | Electric violet on deep indigo — synthwave night |
 
 In React, prefer the reactive `palette` prop — changes crossfade instead of
 remounting.
@@ -279,8 +278,8 @@ should degrade gracefully on garbage numbers, not crash the host.
 ### Perceptual normalization
 
 Palettes differ wildly in distance-from-white: at the same `ringAlpha`, a
-dark saturated preset (`nebula`, `ocean`) reads heavy on a white page while a
-near-white one (`sakura`, `candy`) washes out. With `normalize` (default on),
+dark saturated preset (`ember`, `ocean`) reads heavy on a white page while a
+near-white one (`sakura`, `aurora`) washes out. With `normalize` (default on),
 the engine equalizes this at creation time:
 
 - **Metric:** after building the 256-entry LUT (post-pastel), perceptual

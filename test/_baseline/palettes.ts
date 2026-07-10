@@ -72,25 +72,6 @@ export const EDGE_AURA_PALETTES = {
     [0.80, [255, 235, 240]],  // near-white
     [1.0,  [255, 183, 197]],
   ],
-  /** Molten ember — deep crimson with a white-hot flare; dramatic on dark. */
-  ember: [
-    [0,    [186,  58,  60]],  // deep crimson base
-    [0.25, [244,  96,  62]],  // scarlet
-    [0.46, [255, 158,  96]],  // white-hot orange peak
-    [0.55, [255, 204, 144]],  // flare crest
-    [0.68, [232, 122,  82]],  // cooling amber
-    [0.88, [164,  64,  82]],  // dark maroon exhale
-    [1.0,  [186,  58,  60]],  // loop back to crimson
-  ],
-  /** Ultraviolet — electric violet on near-black; synthwave. */
-  ultraviolet: [
-    [0,    [112,  88, 192]],  // deep indigo base
-    [0.28, [160, 104, 255]],  // electric violet
-    [0.50, [204, 176, 255]],  // lilac flash
-    [0.62, [168, 136, 252]],  // violet
-    [0.80, [130,  98, 216]],  // deep indigo
-    [1.0,  [112,  88, 192]],  // loop back to base
-  ],
 } satisfies Record<string, EdgeAuraPaletteStops>;
 
 /** Union of preset names — keep in sync automatically via keyof. */
