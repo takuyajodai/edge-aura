@@ -117,6 +117,36 @@ describe("palette validation", () => {
   });
 });
 
+describe("palette preset smoke (every named palette, both backgrounds)", () => {
+  // Every EDGE_AURA_PALETTES entry — including the heavy/dark ember and
+  // ultraviolet — must render NaN-free, non-zero, never-over-opaque pixels and
+  // resolve a sane normalization on both backgrounds: alpha strictly inside the
+  // clamp band (0, 1], pastel within [0, 0.35], and a positive finite weight.
+  for (const [name, stops] of Object.entries(EDGE_AURA_PALETTES) as [
+    string,
+    EdgeAuraPaletteStops,
+  ][]) {
+    it.each(["light", "dark"] as const)(`${name} on %s`, (background) => {
+      const engine = mk({ seed: 42, palette: { stops, background } });
+      const norm = engine.getNormalization();
+      engine.step(16.7);
+      engine.step(16.7);
+      const frame = captureFrame(engine);
+
+      expect(frame.some((v) => v !== 0)).toBe(true); // renders something
+      expect(frame.every((v) => Number.isFinite(v))).toBe(true); // NaN-free
+      expect(frame.every((v) => v <= 255)).toBe(true); // never over-opaque
+
+      expect(Number.isFinite(norm.weight)).toBe(true);
+      expect(norm.weight).toBeGreaterThan(0);
+      expect(norm.effRingAlpha).toBeGreaterThan(0);
+      expect(norm.effRingAlpha).toBeLessThanOrEqual(1);
+      expect(norm.effPastel).toBeGreaterThanOrEqual(0);
+      expect(norm.effPastel).toBeLessThanOrEqual(0.35);
+    });
+  }
+});
+
 describe("dt guard", () => {
   it("treats negative and NaN dt as 0 — a later normal step still renders", () => {
     const guarded = mk({ seed: 9 });
@@ -203,7 +233,7 @@ describe("setPalette", () => {
     const engine = mk({ seed: 7 });
     engine.step(16);
     const startFrame = captureFrame(engine);
-    engine.setPalette("nebula", { crossfadeMs: 400 });
+    engine.setPalette("ember", { crossfadeMs: 400 });
     // No step yet — the blend origin is an exact snapshot of the old LUT.
     expect(bytesEqual(captureFrame(engine), startFrame)).toBe(true);
 
@@ -215,7 +245,7 @@ describe("setPalette", () => {
     expect(bytesEqual(mid, end)).toBe(false);
 
     // Same seed + same total elapsed → identical steady output by contract.
-    const direct = mk({ seed: 7, palette: { stops: EDGE_AURA_PALETTES.nebula } });
+    const direct = mk({ seed: 7, palette: { stops: EDGE_AURA_PALETTES.ember } });
     for (let i = 0; i < 28; i++) direct.step(16);
     expect(bytesEqual(end, captureFrame(direct))).toBe(true);
   });
@@ -297,14 +327,14 @@ describe("background normalization", () => {
     expect(after.effRingAlpha).not.toBe(0.9);
   });
 
-  it('never runs the pastel step-down under the dark metric (nebula + "dark" keeps effPastel 0.35)', () => {
+  it('never runs the pastel step-down under the dark metric (ember + "dark" keeps effPastel 0.35)', () => {
     // Regression: the step-down loop lowers pastel to DARKEN colors, which
     // only converges under the light metric. Under the dark metric it would
     // diverge (each step lowers weight, growing alphaScale) and crush the
     // user's pastel to 0 — a heavy palette on "dark" must keep it untouched
     // and rely on the alpha clamp alone.
     const dark = mk({
-      palette: { stops: EDGE_AURA_PALETTES.nebula, background: "dark" },
+      palette: { stops: EDGE_AURA_PALETTES.ember, background: "dark" },
     }).getNormalization();
     expect(dark.effPastel).toBe(0.35);
     expect(dark.effRingAlpha).toBeLessThanOrEqual(1.0);
@@ -1275,29 +1305,29 @@ describe("corner bent-tube: multi-source additive light (v0.4.2)", () => {
 });
 
 describe("palette determinism (stops, not name)", () => {
-  it("'spectrum' by name renders byte-identically to the same stops passed inline", () => {
+  it("'ember' by name renders byte-identically to the same stops passed inline", () => {
     // Proves the engine keys rendering off the stop values, not the preset
-    // name: a manually-supplied array equal to spectrum must be byte-equal.
+    // name: a manually-supplied array equal to ember must be byte-equal.
     // hueDriftDeg 0 + highlight off keeps the frame purely stops-driven.
-    const inlineSpectrum: EdgeAuraPaletteStops = [
-      [0, [33, 212, 154]],
-      [0.12, [20, 212, 196]],
-      [0.26, [56, 170, 255]],
-      [0.4, [139, 92, 246]],
-      [0.52, [236, 72, 153]],
-      [0.63, [249, 115, 22]],
-      [0.73, [251, 191, 36]],
-      [0.85, [74, 222, 128]],
-      [1.0, [33, 212, 154]],
+    // The literal below is pinned to EDGE_AURA_PALETTES.ember — if the preset
+    // stops ever drift from it, this equivalence check fails loudly.
+    const inlineEmber: EdgeAuraPaletteStops = [
+      [0, [186, 58, 60]],
+      [0.25, [244, 96, 62]],
+      [0.46, [255, 158, 96]],
+      [0.55, [255, 204, 144]],
+      [0.68, [232, 122, 82]],
+      [0.88, [164, 64, 82]],
+      [1.0, [186, 58, 60]],
     ];
     const byName = mk({
       seed: 1,
-      palette: { stops: EDGE_AURA_PALETTES.spectrum },
+      palette: { stops: EDGE_AURA_PALETTES.ember },
       motion: { hueDriftDeg: 0 },
     });
     const byStops = mk({
       seed: 1,
-      palette: { stops: inlineSpectrum },
+      palette: { stops: inlineEmber },
       motion: { hueDriftDeg: 0 },
     });
     byName.step(16);
@@ -1524,17 +1554,17 @@ describe("updateOptions", () => {
   });
 
   it("commits an in-flight crossfade to its target before applying", () => {
-    // Start a long crossfade toward nebula, step into the middle of it, then
-    // updateOptions — the fade is cancelled and jumped to the nebula target, so
-    // the frame equals a fresh nebula-stops instance stepped to the same elapsed.
+    // Start a long crossfade toward ember, step into the middle of it, then
+    // updateOptions — the fade is cancelled and jumped to the ember target, so
+    // the frame equals a fresh ember-stops instance stepped to the same elapsed.
     const engine = mk({ seed: 7 });
     engine.step(16);
-    engine.setPalette("nebula", { crossfadeMs: 1000 });
+    engine.setPalette("ember", { crossfadeMs: 1000 });
     engine.step(16); // mid-fade
     engine.updateOptions({}); // empty partial still commits the fade
     const committed = captureFrame(engine);
 
-    const direct = mk({ seed: 7, palette: { stops: EDGE_AURA_PALETTES.nebula } });
+    const direct = mk({ seed: 7, palette: { stops: EDGE_AURA_PALETTES.ember } });
     direct.step(16);
     direct.step(16);
     expect(bytesEqual(committed, captureFrame(direct))).toBe(true);
@@ -1569,12 +1599,12 @@ describe("updateOptions", () => {
     // applyPalette() — which only holds if setPalette wrote its stops back into
     // the resolved config. A non-empty palette partial exercises applyPalette.
     const engine = mk({ seed: 7 });
-    engine.setPalette("nebula", { crossfadeMs: 1000 });
+    engine.setPalette("ember", { crossfadeMs: 1000 });
     engine.step(16); // mid-fade
     engine.updateOptions({ palette: { background: "light" } });
     const committed = captureFrame(engine);
 
-    const direct = mk({ seed: 7, palette: { stops: EDGE_AURA_PALETTES.nebula } });
+    const direct = mk({ seed: 7, palette: { stops: EDGE_AURA_PALETTES.ember } });
     direct.step(16);
     expect(bytesEqual(committed, captureFrame(direct))).toBe(true);
   });

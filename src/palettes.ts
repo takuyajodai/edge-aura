@@ -37,18 +37,6 @@ export const EDGE_AURA_PALETTES = {
     [0.86, [86,  196, 150]],
     [1.0,  [78,  104, 224]],
   ],
-  /** Full-spectrum rainbow cycle — the loudest option. */
-  spectrum: [
-    [0,    [33,  212, 154]],
-    [0.12, [20,  212, 196]],
-    [0.26, [56,  170, 255]],
-    [0.40, [139, 92,  246]],
-    [0.52, [236, 72,  153]],
-    [0.63, [249, 115, 22 ]],
-    [0.73, [251, 191, 36 ]],
-    [0.85, [74,  222, 128]],
-    [1.0,  [33,  212, 154]],
-  ],
   /** Cool-tone aurora: green / white / ice blue only — no warm hues. */
   aurora: [
     [0,    [ 52, 211, 153]],  // emerald
@@ -76,22 +64,6 @@ export const EDGE_AURA_PALETTES = {
     [0.72, [ 26, 188, 230]],  // cyan
     [1.0,  [ 12, 116, 215]],
   ],
-  /** Pastel confectionery — soft pinks, peach, lavender, baby blue. */
-  candy: [
-    [0,    [255, 175, 204]],  // baby pink
-    [0.24, [255, 198, 173]],  // peach
-    [0.48, [202, 182, 255]],  // lavender
-    [0.74, [162, 197, 255]],  // baby blue
-    [1.0,  [255, 175, 204]],
-  ],
-  /** Deep-space purples — indigo through violet and magenta to pink. */
-  nebula: [
-    [0,    [ 79,  70, 229]],  // indigo
-    [0.25, [139,  92, 246]],  // violet
-    [0.50, [217,  70, 239]],  // magenta
-    [0.75, [236,  72, 153]],  // pink
-    [1.0,  [ 79,  70, 229]],
-  ],
   /** Cherry-blossom — sakura pinks alternating with near-white blush. */
   sakura: [
     [0,    [255, 183, 197]],  // sakura pink
@@ -99,6 +71,25 @@ export const EDGE_AURA_PALETTES = {
     [0.55, [255, 143, 171]],  // coral pink
     [0.80, [255, 235, 240]],  // near-white
     [1.0,  [255, 183, 197]],
+  ],
+  /** Molten ember — deep crimson with a white-hot flare; dramatic on dark. */
+  ember: [
+    [0,    [186,  58,  60]],  // deep crimson base
+    [0.25, [244,  96,  62]],  // scarlet
+    [0.46, [255, 158,  96]],  // white-hot orange peak
+    [0.55, [255, 204, 144]],  // flare crest
+    [0.68, [232, 122,  82]],  // cooling amber
+    [0.88, [164,  64,  82]],  // dark maroon exhale
+    [1.0,  [186,  58,  60]],  // loop back to crimson
+  ],
+  /** Ultraviolet — electric violet on near-black; synthwave. */
+  ultraviolet: [
+    [0,    [112,  88, 192]],  // deep indigo base
+    [0.28, [160, 104, 255]],  // electric violet
+    [0.50, [204, 176, 255]],  // lilac flash
+    [0.62, [168, 136, 252]],  // violet
+    [0.80, [130,  98, 216]],  // deep indigo
+    [1.0,  [112,  88, 192]],  // loop back to base
   ],
 } satisfies Record<string, EdgeAuraPaletteStops>;
 

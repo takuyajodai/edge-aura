@@ -209,7 +209,7 @@ function Demo() {
 
   // Accent tint derived from the current palette's first stop. Pressed pills
   // put text on the raw accent, so pick the text color by accent luminance —
-  // pastel-first palettes (sakura, candy) would leave white-on-pink otherwise.
+  // pastel-first palettes (sakura) would leave white-on-pink otherwise.
   useEffect(() => {
     const [, [r, g, b]] = EDGE_AURA_PALETTES[palette][0];
     const root = document.documentElement.style;

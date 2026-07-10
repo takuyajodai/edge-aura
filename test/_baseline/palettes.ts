@@ -37,18 +37,6 @@ export const EDGE_AURA_PALETTES = {
     [0.86, [86,  196, 150]],
     [1.0,  [78,  104, 224]],
   ],
-  /** Full-spectrum rainbow cycle — the loudest option. */
-  spectrum: [
-    [0,    [33,  212, 154]],
-    [0.12, [20,  212, 196]],
-    [0.26, [56,  170, 255]],
-    [0.40, [139, 92,  246]],
-    [0.52, [236, 72,  153]],
-    [0.63, [249, 115, 22 ]],
-    [0.73, [251, 191, 36 ]],
-    [0.85, [74,  222, 128]],
-    [1.0,  [33,  212, 154]],
-  ],
   /** Cool-tone aurora: green / white / ice blue only — no warm hues. */
   aurora: [
     [0,    [ 52, 211, 153]],  // emerald
@@ -75,22 +63,6 @@ export const EDGE_AURA_PALETTES = {
     [0.50, [ 64, 224, 208]],  // turquoise
     [0.72, [ 26, 188, 230]],  // cyan
     [1.0,  [ 12, 116, 215]],
-  ],
-  /** Pastel confectionery — soft pinks, peach, lavender, baby blue. */
-  candy: [
-    [0,    [255, 175, 204]],  // baby pink
-    [0.24, [255, 198, 173]],  // peach
-    [0.48, [202, 182, 255]],  // lavender
-    [0.74, [162, 197, 255]],  // baby blue
-    [1.0,  [255, 175, 204]],
-  ],
-  /** Deep-space purples — indigo through violet and magenta to pink. */
-  nebula: [
-    [0,    [ 79,  70, 229]],  // indigo
-    [0.25, [139,  92, 246]],  // violet
-    [0.50, [217,  70, 239]],  // magenta
-    [0.75, [236,  72, 153]],  // pink
-    [1.0,  [ 79,  70, 229]],
   ],
   /** Cherry-blossom — sakura pinks alternating with near-white blush. */
   sakura: [
