@@ -773,6 +773,50 @@ describe("corner fill (opt-in): crisp band-union fill", () => {
     expect(G[0]).toBeGreaterThan(200); // the physical tip is near-solid, not a faint edge
   });
 
+  // ---- no tip notch: the WHOLE outward pocket is solid, at ALL FOUR corners --
+  // Regression guard for the reported "quarter-round notch at the corner tip":
+  // any pixel whose nearest centerline branch is OUTWARD (the h-straight, the
+  // v-straight, or the rounded arc) must render the flat solid margin — a single
+  // outward branch clamps t → 0 (evalCov) and saturates the p3-norm, so no
+  // circular-boundary cutoff can leave a transparent notch. Crucially this scans
+  // the ARC-EXTERIOR diagonal too (both straights slightly INWARD but the arc
+  // outward — au,av > 0, aT < 0), the exact region an outward arc-branch cutoff
+  // used to threaten. Checked at every corner (via cmap) on BOTH backgrounds so a
+  // regression in any single corner or one background fails loudly.
+  it.each([
+    [3, 0], [3, 11], [3, 32], [8, 0], [8, 24], [12, 0], [12, 40],
+  ] as const)("no corner-tip notch: full outward pocket is solid at all 4 corners, light + dark (inset %i / CR %i)", (inset, cr) => {
+    const band = 76, rim = inset + cr;
+    for (const bg of ["light", "dark"] as const) {
+      const G = compositeAlpha(
+        settleTiles({ geometry: { inset, cornerRadius: cr, band, cornerFill: true }, palette: { background: bg } }),
+        band, rim,
+      );
+      // The flat outer solid: the top straight's OUTERMOST margin row (|tIn| ≈ inset).
+      // Every outward-branch pixel carries a branch clamped to exactly this value.
+      const solid = bil(G, W / 2, 0.5);
+      expect(solid).toBeGreaterThan(200); // sanity: the straight margin itself is solid
+      for (let k = 0; k < 4; k++) {
+        // Literal corner-tip pixel (u = v = 0) — must reach the solid margin, no notch.
+        const [tx, ty] = cmap[k](0, 0);
+        expect(G[ty * W + tx]).toBeGreaterThanOrEqual(solid - 2);
+        let worst = 0, minA = 255;
+        for (let v = 0; v < rim; v++) for (let u = 0; u < rim; u++) {
+          const au = u + 0.5 - inset, av = v + 0.5 - inset;
+          const aT = cr - Math.hypot(rim - (u + 0.5), rim - (v + 0.5)); // arc signed dist
+          if (Math.min(au, av, aT) <= 0) { // pocket: any branch outward → must be solid
+            const [gx, gy] = cmap[k](u, v);
+            const val = G[gy * W + gx];
+            minA = Math.min(minA, val);
+            worst = Math.max(worst, solid - val);
+          }
+        }
+        expect(minA).toBeGreaterThan(0);   // no fully-transparent notch pixel anywhere in the pocket
+        expect(worst).toBeLessThanOrEqual(2); // never dips below the flat solid margin
+      }
+    }
+  });
+
   // ---- (b) core-bend + inner-contour rounding preservation ------------------
   // Fill mode keeps the arc (rounded-path) distance for the CORE and the near-bend
   // inner dissolve, so both contours follow the arc exactly as ROUND mode does
