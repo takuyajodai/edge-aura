@@ -15,7 +15,7 @@
 
   --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
   --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  --serif: "Newsreader", Georgia, "Times New Roman", serif;
+  --serif: "Ramaraja", Georgia, "Times New Roman", serif;
 
   --dur: 180ms;
   --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
@@ -139,13 +139,15 @@ a {
   box-shadow: 0 1px 0 var(--border);
 }
 .site-header.is-scrolled .site-header-inner {
-  padding: 12px 24px;
+  /* Optically asymmetric: the aura band consumes the top edge and Ramaraja's
+     glyphs sit low in their line box, so equal padding reads top-tight. */
+  padding: 17px 24px 9px;
 }
 
 .wordmark {
   font-family: var(--serif);
-  font-weight: 600;
-  font-size: 19px;
+  font-weight: 400;
+  font-size: 23px;
   letter-spacing: -0.01em;
   text-decoration: none;
   color: var(--text);
@@ -207,11 +209,11 @@ a {
 .hero-title {
   margin: 0;
   font-family: var(--serif);
-  /* Newsreader's optical-size axis gives this its display cut at hero size
-     (font-optical-sizing is on by default for variable fonts). */
-  font-size: clamp(44px, 12vw, 76px);
-  font-weight: 600;
-  letter-spacing: -0.015em;
+  /* Ramaraja ships 400 only and its Latin runs small in the em box —
+     size scaled up ~18% vs the previous face to match optically. */
+  font-size: clamp(52px, 14vw, 90px);
+  font-weight: 400;
+  letter-spacing: -0.01em;
   line-height: 1;
 }
 .hero-sub {
