@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2] - 2026-07-12
+
+### Changed
+
+- **`cornerFill` rebuilt as a crisp band-union fill** (user-driven spec:
+  "outer corner radius 0, inner corner radius `cornerRadius`"): the region
+  outside the centerline renders as solid margin all the way to the
+  physical corner tip (no radial decay), and the inner dissolve uses the
+  nearer of the rounded-path and band-union distance fields — so the inner
+  edge still rounds with `cornerRadius` while no point in the corner block
+  is ever darker than the straight bands at equal depth (worst measured
+  deficit 1.3/255 across an inset x radius x band matrix including
+  cornerRadius 0). Replaces the 0.5.1 radial-pocket falloff, which left a
+  rectangular dark region between the bands. Fill-mode frame cost is now
+  on par with round mode. Round mode stays bit-identical.
+
 ## [0.5.1] - 2026-07-12
 
 ### Fixed
