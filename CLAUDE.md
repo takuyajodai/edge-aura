@@ -42,9 +42,14 @@ npm publish         # prepublishOnly runs typecheck + build + check:dist
 
 - Tests live in `test/` (vitest): `engine.test.ts` runs in node against the
   stub-canvas harness in `test/harness.ts` (recording 2d context — real
-  `Uint8ClampedArray` buffers, includes a golden pixel-snapshot hash);
+  `Uint8ClampedArray` buffers, includes golden pixel-snapshot hashes for a
+  light and a dark 30-frame sequence, plus a mid-edge span identity hash);
   `react.test.tsx` runs under jsdom with `./engine` mocked via `vi.mock`.
   `test/` is not shipped (the package.json `files` whitelist covers this).
+- `npm run bench` (`test/render-cost.bench.ts`, NOT part of `npm test`) times
+  the additive-corner overhead against a frozen single-source engine vendored
+  under `test/_baseline/` — that copy is a deliberate A/B baseline, not a stray
+  duplicate; leave it frozen.
 - CI is `.github/workflows/ci.yml`: on every push and pull request it runs
   `npm ci`, typecheck, build, `check:dist`, `npm test`, and `demo:build`.
 
