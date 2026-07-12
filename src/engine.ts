@@ -1018,13 +1018,6 @@ export function createAuraEngine(
   // is fully faded (contributes 0) — the early-out in addNeonPixel. Past it the
   // outward feather is already exactly 0, so the cut is free. = −(INSET+feather).
   let ARC_FLOOR = 0;
-  // Pocket floor (fill mode): the arc branch is included this deep on the exterior
-  // side, enough to cover the physical corner tip (the deepest outward point in
-  // the RIM×RIM tile, at aT = CR − RIM·√2), so the arc's ring-continuous colour
-  // reaches the tip. Its coverage there is the flat centerline value (evalCov
-  // clamps t → 0 outward), so the whole pocket renders as solid margin — see
-  // addNeonPixel.
-  let POCKET_ARC_FLOOR = 0;
   // Longitudinal fade length (px) for a straight branch past its segment end.
   let LONG_FADE = 1;
 
@@ -1127,14 +1120,12 @@ export function createAuraEngine(
     // clamp and smeared onto the BS−1 edge. LONG_FADE ≈ 1.5·CR: a straight branch
     // is ~half-on at the arc midpoint (feeds the bend interior — S3) and off by the
     // far tangent (no convex over-light). ARC_FLOOR is the round-mode fully-faded
-    // arc cutoff; POCKET_ARC_FLOOR lets fill mode's arc reach the corner tip (the
-    // deepest outward point in the tile is at aT = CR − RIM·√2), so the arc's
-    // ring-continuous colour reaches the tip (its coverage there is the flat
-    // centerline value — the pocket is solid, filled by the two straights too).
+    // arc cutoff; FILL mode has no outward cutoff (the arc is included out to the
+    // physical corner tip regardless of tile sizing — see addNeonPixel), so the
+    // "outer radius 0" pocket fill is structural, not tuned to a floor constant.
     BS = Math.max(1, RIM, BAND);
     LONG_FADE = Math.max(2, CR);
     ARC_FLOOR = -(INSET + CORNER_FEATHER_PX);
-    POCKET_ARC_FLOOR = CR - RIM * Math.SQRT2 - 1;
 
     // Build the per-corner additive box maps + straight 1D geometry, and
     // (re)allocate the per-frame live-profile stores. All values are pure
@@ -1735,13 +1726,15 @@ export function createAuraEngine(
     // the core and the near-bend inner dissolve with cornerRadius in BOTH modes.
     // Skipped once negligible deep inward (≥ bandCut) or far outward. ROUND mode
     // cuts at ARC_FLOOR (past it the outward feather below is already 0) and
-    // defers the feather to the final alpha. FILL mode has no feather: it includes
-    // the arc across the pocket to POCKET_ARC_FLOOR (the corner tip) so the arc's
-    // ring-continuous colour reaches the tip; its coverage there is the flat
+    // defers the feather to the final alpha. FILL mode has NO outward cutoff at
+    // all: the arc is included at every pocket pixel out to the physical corner
+    // tip (only the deep-inward bandCut gate applies), so the "outer radius 0"
+    // fill is STRUCTURAL — it can never leave a circular-boundary notch at the
+    // tip regardless of tile sizing. Its coverage on the outward side is the flat
     // centerline value (evalCov clamps t → 0 outward), filling the pocket solid.
     // The eval is identical (evalCov, d_rounded) in both modes.
     const aT = boxArcTIn[kind][ly * BS + lx];
-    if (aT > (CORNER_FILL ? POCKET_ARC_FLOOR : ARC_FLOOR) && aT < bandCut) {
+    if ((CORNER_FILL || aT > ARC_FLOOR) && aT < bandCut) {
       const o = boxArcJ[kind][ly * BS + lx] * NF;
       evalCov(aT, aProf, o);
       const c = covOut;
