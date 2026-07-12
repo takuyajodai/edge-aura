@@ -4,3 +4,4 @@ demo/dist/
 *.tgz
 .DS_Store
 .vercel
+.launch/
