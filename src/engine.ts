@@ -15,34 +15,59 @@
  *   rect inset `inset` px from the edges with corner radius `cornerRadius`
  *   (arc centers at (inset+cr, inset+cr) etc.).  Per pixel, t is the distance
  *   to that path (straights: depthFromEdge − inset; corner quadrants:
- *   |p − center| − cr) and alpha = clamp(Ac·G(t,σc) + Ab·G(t,σbloom), 0, 1)
- *   ·intensity — a narrow near-opaque core Gaussian whose thickness σc
- *   undulates smoothly along the ring, plus an ASYMMETRIC bloom: the outward
- *   side stays a tight Gaussian while the inward side is a long-tailed
- *   rational falloff that breathes on slow noise — the inner face dissolves
- *   with no perceptible end (windowed to 0 at `band`).  Amplitude and width
- *   also swell under the tap/burst springs and the per-press key bumps
- *   (a fixed pool of independent springs, each anchored at the bottom-edge
- *   x of its keypress — bumps rise and decay in place, never traveling).
- *   The palette LUT is sampled by arc position s along the path (continuous
- *   around corners: straight lengths + cr·θ for arcs) so the hue cycles
- *   seamlessly around the ring; the core is whitened slightly for neon feel.
+ *   |p − center| − cr) and the geometric coverage is
+ *   clamp(Ac·G(t,σc) + Ab·bloom(t,σbloom), 0, 1) — a narrow near-opaque core
+ *   Gaussian whose thickness σc undulates smoothly along the ring, plus an
+ *   ASYMMETRIC bloom: the outward side stays a tight Gaussian while the inward
+ *   side is a long-tailed rational falloff — the inner face dissolves with no
+ *   perceptible end (windowed to 0 at `band`).  Every amplitude/width is
+ *   modulated per position by a PERIODIC ring-noise field (G1): three sine
+ *   octaves taken in INTEGER harmonics of the ring angle θ, so the pattern
+ *   wraps byte-exactly at the perimeter closure and breathes in time.
+ *   Amplitude and width also swell under the tap/burst springs and the
+ *   per-press key bumps (a fixed pool of independent springs, each anchored at
+ *   the bottom-edge x of its keypress — bumps rise and decay in place, never
+ *   traveling).  The palette LUT is sampled by arc position s along the path
+ *   (continuous around corners: straight lengths + cr·θ for arcs) so the hue
+ *   cycles seamlessly around the ring; the core is whitened slightly for neon.
  *
- *   Rendering tiles the ring into 8 buffers with NO overlap: 4 straight
- *   strips (top/bottom: (W−2·(inset+cr))×band, left/right: band×(H−2·(inset+cr)),
- *   offset inset+cr along their edge) and 4 CQ×CQ corner buffers.  Each
- *   corner buffer draws only the quarter-disc quadrant (both coordinates
- *   within inset+cr of the screen corner — exactly the region whose nearest
- *   path point lies on the arc); strips own everything else, splitting the
- *   interior along the corner diagonals so no pixel is written twice.
+ *   Corners are MULTI-SOURCE ADDITIVE (v0.4+): instead of one nearest-path
+ *   sample, every near-corner pixel sums the geometric coverage of the three
+ *   branches of the bent tube — the two adjacent straights (each with its own
+ *   live noise profile) and the arc — combined by a p=3 norm, colours energy-
+ *   weighted.  Away from a corner one branch dominates and the model degenerates
+ *   to the single-source strip exactly (the mid-edge stays bit-identical).  The
+ *   opt-in `cornerFill` reuses the same machinery as a crisp BAND-UNION fill:
+ *   the square viewport corner is filled solid out to the tip (never darker than
+ *   either adjacent band) while the inner edge keeps the rounded arc — it does
+ *   NOT switch to a separate square-tube path.
+ *
+ *   Output stages (per pixel, after coverage): on a DARK background the coverage
+ *   passes through a dark alpha-response LUT (pow(a, darkAlphaGamma), lifting the
+ *   faint tail so the glow reads with body on black) — colours are pre-lifted in
+ *   Oklab chroma (darkChroma) at LUT build time and an optional canvas
+ *   mix-blend-mode adds the glow onto the page.  Finally a mean-preserving 8×8
+ *   ordered (Bayer) dither breaks the 1/255 quantization contours in the faint
+ *   tail into a stipple (light and dark alike).
+ *
+ *   Rendering tiles the ring into 8 pixel-DISJOINT buffers: 4 straight strips
+ *   (top/bottom: (W−2·(inset+cr))×band, left/right: band×(H−2·(inset+cr)),
+ *   offset inset+cr along their edge) and 4 corner tiles of side CQ = inset+cr
+ *   anchored at the screen corners.  Strips own the edges and split the interior
+ *   along the 45° corner diagonals; corner tiles own the arc quadrant; no pixel
+ *   is written twice.  The additive corner sum reads a box slightly larger than a
+ *   tile, so near-corner STRIP pixels also fold in the arc/adjacent-straight
+ *   contribution — but each pixel is still emitted by exactly one buffer.
  *   Buffers composite onto the main canvas via drawImage (source-over).
- *   Per-column loops break out as soon as both Gaussians are negligible,
- *   keeping the per-frame cost around 2(W+H)·~30 pixel writes.
+ *   Per-column loops break out as soon as the coverage is negligible, keeping
+ *   the per-frame cost around 2(W+H)·~30 pixel writes.
  *
- *   Code structure: the four strips and four corners are table-driven — a
- *   per-frame edge-config array (strips) and per-kind lookup tables (corners)
- *   feed shared neonAt / writeNeonPixel routines, so the per-pixel formula
- *   lives in exactly one place.
+ *   Code structure: strips are table-driven from a per-frame edge-config array
+ *   and share the neonAt / writeNeonPixel routines; corners refill their three
+ *   live branch profiles once per frame (snapCornerSources) and composite
+ *   through addNeonPixel / evalCov.  The single-source per-pixel formula lives
+ *   in exactly one place (writeNeonPixel); evalCov is its byte-identical twin,
+ *   so a lone dominant branch reproduces a strip pixel exactly.
  *
  * Configuration: every tuning constant is exposed through `EdgeAuraOptions`
  * (all optional; defaults reproduce the original pixel-QA'd appearance
@@ -968,10 +993,12 @@ export function createAuraEngine(
   let CQ = 0, ARC = 0;
   let CORE_SIGMA_BASE = 0, CORE_SIGMA_VAR = 0;
   let INNER_SOFT_BASE = 0, INNER_SOFT_VAR = 0, INNER_SIGMA_MAX = 0;
-  // Corner fill (opt-in): when true the corner tile's signed distance switches
-  // from the arc's radial metric to the L-shaped sharp-corner centerline path,
-  // so the ring renders as one continuous SQUARE tube (see the cornerFill
-  // option JSDoc and the corner-map build in deriveGeometry). Derived below.
+  // Corner fill (opt-in): when true the corner is a crisp BAND-UNION fill —
+  // the same additive branch maps as round mode (arc radial metric kept), but
+  // addNeonPixel drops the straights' longitudinal windows and the outward
+  // feather so the square viewport corner fills solid out to the tip while the
+  // inner edge keeps the rounded arc (see the cornerFill option JSDoc and the
+  // additive-corner block above). Only addNeonPixel branches on it. Derived below.
   let CORNER_FILL = false;
 
   // Bloom depth profile scales with band so the falloff stays SELF-SIMILAR:
@@ -2181,7 +2208,8 @@ export function createAuraEngine(
     pxPerD: number;
     pyPerD: number;
     // Corner kinds (0 TL, 1 TR, 2 BR, 3 BL) adjacent to column i = 0 and
-    // i = count − 1, for the corner-continuity crossfade.
+    // i = count − 1 — which corner's additive source profiles a near-corner
+    // column reads (the nearer corner owns it; no crossfade).
     startCorner: number;
     endCorner: number;
   }
@@ -2266,12 +2294,10 @@ export function createAuraEngine(
     for (const cfg of strips) drawStrip(cfg);
   };
 
-  // Each corner draws ONLY the RIM×RIM quadrant whose pixels project onto
-  // the arc (both coordinates within RIM of the screen corner); everything
-  // else stays transparent and is owned by the strips.  t is the radial
-  // distance to the arc, s = arcStart + CR·θ keeps palette/noise continuous,
-  // and hotspot gating is inherited from the nearer of the two adjacent
-  // straight edges (split at the arc midpoint f = 0.5).
+  // Each corner draws ONLY the RIM×RIM quadrant at the screen corner (both
+  // coordinates within RIM); everything else stays transparent and is owned by
+  // the strips. Every tile pixel is composited additively from the three tube
+  // branches (arc + both adjacent straights) via addNeonPixel — see the body.
   const drawCorner = (
     buf: Buf | null,
     ccx: number, ccy: number, // arc center (global)
