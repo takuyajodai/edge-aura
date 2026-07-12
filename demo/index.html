@@ -15,15 +15,11 @@
     <meta property="og:image" content="https://raw.githubusercontent.com/takuyajodai/edge-aura/main/docs/hero.png" />
     <meta name="twitter:card" content="summary_large_image" />
     <!-- Editorial serif for the hero title / wordmark only — body text stays
-         system sans. Ramaraja: a single-weight roman with Telugu-derived
-         metrics — its Latin sits small in the em box, so sizes below are
+         system sans. Ramaraja (OFL, latin subset) is SELF-HOSTED from
+         ./fonts/ so no visitor request ever reaches a third-party font CDN
+         (GDPR: the LG München Google-Fonts line of cases). License in
+         ./fonts/OFL.txt. Its Latin sits small in the em box, so sizes are
          scaled up ~18% to compensate optically. -->
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Ramaraja&display=swap"
-      rel="stylesheet"
-    />
     <!--
       Pre-paint bootstrap: set data-theme and lang on <html> synchronously,
       before first paint, so a saved/OS-dark visitor never sees a white flash
