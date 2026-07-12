@@ -19,7 +19,7 @@
     "type": "git",
     "url": "git+https://github.com/takuyajodai/edge-aura.git"
   },
-  "homepage": "https://github.com/takuyajodai/edge-aura#readme",
+  "homepage": "https://edge-aura-xi.vercel.app",
   "bugs": "https://github.com/takuyajodai/edge-aura/issues",
   "type": "module",
   "sideEffects": false,

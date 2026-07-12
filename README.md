@@ -3,6 +3,8 @@
 [![npm version](https://img.shields.io/npm/v/edge-aura.svg)](https://www.npmjs.com/package/edge-aura)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 
+**[Live demo →](https://edge-aura-xi.vercel.app)**
+
 <img src="https://raw.githubusercontent.com/takuyajodai/edge-aura/main/docs/hero.png" alt="edge-aura — an organic glow ring hugging the viewport edges, with a tap bloom on the bottom edge" width="100%">
 
 An organic screen-edge glow, inspired by the ambient edge glows of on-device
@@ -317,6 +319,8 @@ Disable with `palette: { normalize: false }`, or retune via
 `setPalette` crossfade starts).
 
 ## Demo
+
+Hosted: **https://edge-aura-xi.vercel.app** (`edge-aura.js.org` pending)
 
 ```sh
 git clone https://github.com/takuyajodai/edge-aura
