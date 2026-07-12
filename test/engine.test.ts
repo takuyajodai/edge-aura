@@ -808,6 +808,216 @@ describe("corner fill (opt-in): lit corner pocket, seamless with the rounded tub
   });
 });
 
+describe("corner fill: pocket falloff scales with pocket size (v0.5.1)", () => {
+  // v0.5.1 fix. cornerFill v3 lit the pocket with the arc's OWN outward bloom
+  // sigma (band-scaled sb ∈ ~[2.6, 16] px), which on large geometries decays to
+  // nothing long before the physical corner tip — the tip sits ~RIM·√2 − CR px
+  // beyond the arc (≈ 30 px at inset 12 / CR 32 / band 50), so the pocket rendered
+  // DARK (the user-reported bug). The fix floors the ARC branch's outward sigma to
+  // tipDist / POCKET_K (POCKET_K = 1.7) so the falloff scales with the pocket's
+  // real size and reaches the tip. The straights keep their raw sigma (flooring
+  // them would step at the tile↔strip / mid-edge handoff — see POCKET_K), and the
+  // arc alone fills the whole pocket because both straights are longitudinally
+  // windowed off along the diagonal and in the delta zone near (INSET, INSET).
+  //
+  // The v3 matrix only probed CR 6/11/24 at inset 3 (tips ≤ ~14 px past the arc,
+  // inside the raw sigma) and missed this regime. These tests add a full geometry
+  // matrix AND a 2D pocket scan (not just the diagonal ray): every pocket pixel
+  // stays lit, no local valley along three ray families, the delta zone near the
+  // L-intersection is filled, and the tile↔strip / mid-edge seam handoffs carry no
+  // step — so a blank "delta" triangle or a "band suddenly ends" artifact is
+  // impossible. Stub viewport 800×600.
+  const W = 800, H = 600;
+  const TL = 4; // captureBuffers tile index
+
+  const settleTiles = (opts: EdgeAuraOptions): Uint8ClampedArray[] => {
+    const e = mk({ seed: 42, palette: { background: "dark" }, motion: { hueDriftDeg: 0 }, ...opts });
+    let bufs: Uint8ClampedArray[] = [];
+    for (let f = 0; f < 12; f++) { e.step(16.7); bufs = captureBuffers(e); }
+    return bufs;
+  };
+  // Source-over composite of the 8 disjoint tiles into a W×H alpha grid (a=0 never
+  // overwrites), so the TL pocket, its strips, and the seams share one space.
+  const compositeAlpha = (bufs: Uint8ClampedArray[], band: number, rim: number): Float64Array => {
+    const G = new Float64Array(W * H);
+    const put = (buf: Uint8ClampedArray, bw: number, bh: number, ox: number, oy: number) => {
+      for (let y = 0; y < bh; y++) for (let x = 0; x < bw; x++) {
+        const bi = (y * bw + x) * 4;
+        if (buf[bi + 3] === 0) continue;
+        G[(oy + y) * W + (ox + x)] = buf[bi + 3];
+      }
+    };
+    const topW = W - 2 * rim, leftH = H - 2 * rim;
+    put(bufs[0], topW, band, rim, 0);           // top
+    put(bufs[1], topW, band, rim, H - band);    // bottom
+    put(bufs[2], band, leftH, 0, rim);          // left
+    put(bufs[3], band, leftH, W - band, rim);   // right
+    put(bufs[4], rim, rim, 0, 0);               // TL
+    put(bufs[5], rim, rim, W - rim, 0);         // TR
+    put(bufs[6], rim, rim, W - rim, H - rim);   // BR
+    put(bufs[7], rim, rim, 0, H - rim);         // BL
+    return G;
+  };
+  const at = (G: Float64Array, x: number, y: number) => G[Math.round(y) * W + Math.round(x)];
+  const bil = (G: Float64Array, x: number, y: number): number => {
+    if (x < 0) x = 0; if (y < 0) y = 0;
+    const x0 = Math.floor(x), y0 = Math.floor(y), fx = x - x0, fy = y - y0;
+    const g = (xx: number, yy: number) => G[yy * W + xx];
+    return (g(x0, y0) * (1 - fx) + g(x0 + 1, y0) * fx) * (1 - fy) +
+           (g(x0, y0 + 1) * (1 - fx) + g(x0 + 1, y0 + 1) * fx) * fy;
+  };
+  // TL diagonal ray, `radial` px out from the arc center (rim,rim) toward the tip.
+  const diagAt = (G: Float64Array, rim: number, radial: number) =>
+    bil(G, rim - radial / Math.SQRT2, rim - radial / Math.SQRT2);
+  // Worst dip-then-rise in a sequence expected to be non-increasing.
+  const worstValley = (vals: number[]): number => {
+    let runMin = vals[0], worst = 0;
+    for (const v of vals) { if (v < runMin) runMin = v; else worst = Math.max(worst, v - runMin); }
+    return worst;
+  };
+  // v3-style boundary excess: cross-step minus the inner gradient one px into each
+  // side (a smooth field — even a steep one — gives ~0; only a discontinuity is +).
+  const seamExcess = (G: Float64Array, tx: number, ty: number, sx: number, sy: number): number => {
+    const dx = sx - tx, dy = sy - ty;
+    const cross = Math.abs(at(G, tx, ty) - at(G, sx, sy));
+    const tileInner = Math.abs(at(G, tx, ty) - at(G, tx - dx, ty - dy));
+    const stripInner = Math.abs(at(G, sx, sy) - at(G, sx + dx, sy + dy));
+    return cross - Math.max(tileInner, stripInner);
+  };
+
+  const insets = [3, 8, 12], crs = [6, 16, 32, 40], bands = [34, 76, 120];
+  // RIM never approaches min(W,H)/2 = 300 for any combo (max RIM = 52), so none
+  // are skipped; the guard is kept explicit per the spec.
+  const cells: Array<[number, number, number]> = [];
+  for (const inset of insets) for (const cr of crs) for (const band of bands) {
+    if (inset + cr < Math.min(W, H) / 2) cells.push([inset, cr, band]);
+  }
+
+  it.each(cells)(
+    "pocket fully lit, monotone, seamless — inset %i / CR %i / band %i (dark)",
+    (inset, cr, band) => {
+      const rim = inset + cr;
+      const Gf = compositeAlpha(settleTiles({ geometry: { inset, cornerRadius: cr, band, cornerFill: true } }), band, rim);
+      const Gr = compositeAlpha(settleTiles({ geometry: { inset, cornerRadius: cr, band, cornerFill: false } }), band, rim);
+
+      // (d) interior (radial ≤ CR−1) byte-identical to round mode: fill differs
+      // only in the pocket, so the bend + its cornerRadius are exactly round's.
+      let interiorMax = 0, interiorN = 0;
+      for (let y = 0; y < rim; y++) for (let x = 0; x < rim; x++) {
+        if (Math.hypot(x + 0.5 - rim, y + 0.5 - rim) <= cr - 1) {
+          interiorMax = Math.max(interiorMax, Math.abs(at(Gf, x, y) - at(Gr, x, y)));
+          interiorN++;
+        }
+      }
+      expect(interiorN).toBeGreaterThan(0);
+      expect(interiorMax).toBeLessThanOrEqual(1); // within the dither
+
+      // (a) tip lit: ≥ 8/255 absolute AND ≥ 0.35× the arc's OUTWARD-EDGE alpha on
+      // the diagonal. "Arc outward edge" = the tube's outward half-maximum (FWHM)
+      // boundary (the saturated core itself is not a meaningful reference — the
+      // dark-gamma pins it near max on every geometry).
+      const tip = at(Gf, 0, 0);
+      const peak = diagAt(Gf, rim, cr);
+      let hmVal = peak;
+      for (let d = 0; d <= rim * 1.5; d += 0.25) {
+        const v = diagAt(Gf, rim, cr + d);
+        if (v <= 0.5 * peak) { hmVal = v; break; }
+      }
+      expect(tip).toBeGreaterThanOrEqual(8);
+      expect(tip).toBeGreaterThanOrEqual(0.35 * hmVal);
+
+      // (b) monotone non-increasing decay along the EXACT integer tile diagonal
+      // (k,k), arc → tip (no interpolation ripple). Dither tolerance 1/255.
+      const kEdge = Math.floor(rim - cr / Math.SQRT2);
+      const diagVals: number[] = [];
+      for (let k = kEdge; k >= 0; k--) diagVals.push(at(Gf, k, k));
+      expect(worstValley(diagVals)).toBeLessThanOrEqual(1);
+
+      // 2D coverage: NO pocket pixel below the absolute floor (radial > CR, within
+      // the tile) — rules out a blank "delta" triangle anywhere in the pocket.
+      let minPocket = Infinity;
+      for (let y = 0; y < rim; y++) for (let x = 0; x < rim; x++) {
+        const radial = Math.hypot(x + 0.5 - rim, y + 0.5 - rim);
+        if (radial > cr && radial <= rim * Math.SQRT2 + 0.5) minPocket = Math.min(minPocket, at(Gf, x, y));
+      }
+      expect(minPocket).toBeGreaterThanOrEqual(8);
+
+      // No LOCAL VALLEY along two more ray families: the row just inside the top
+      // edge (y = inset/2) and the column just inside the left edge (x = inset/2),
+      // walking toward the tip. Dither tolerance 1/255.
+      const ry = Math.floor(inset / 2), cx = Math.floor(inset / 2);
+      const rowVals: number[] = [], colVals: number[] = [];
+      for (let x = rim - 1; x >= 0; x--) rowVals.push(at(Gf, x, ry));
+      for (let y = rim - 1; y >= 0; y--) colVals.push(at(Gf, cx, y));
+      expect(worstValley(rowVals)).toBeLessThanOrEqual(1);
+      expect(worstValley(colVals)).toBeLessThanOrEqual(1);
+
+      // Delta zone: the segment from the L-intersection (inset,inset) to the arc
+      // midpoint is filled and BRIGHTER than the tip (continuous with the arc
+      // field; the straights are windowed off here so it is arc-lit).
+      const amX = rim - cr / Math.SQRT2;
+      let deltaMin = Infinity;
+      for (let t = 0; t <= 1.0001; t += 0.1) {
+        const p = inset + (amX - inset) * t;
+        deltaMin = Math.min(deltaMin, bil(Gf, p, p));
+      }
+      expect(deltaMin).toBeGreaterThan(tip);
+
+      // (c) arc-crossing seam: fill introduces no step across radial = CR beyond
+      // round's own radial gradient (they share the interior; the pocket is the
+      // arc's own C0 outward Gaussian). Straddle excess over round ≤ 2/255.
+      let arcExcess = 0;
+      for (let a = 182; a <= 268; a += 1) {
+        const ux = Math.cos((a * Math.PI) / 180), uy = Math.sin((a * Math.PI) / 180);
+        const fx = (r: number) => rim + r * ux, fy = (r: number) => rim + r * uy;
+        const fStep = Math.abs(bil(Gf, fx(cr - 0.5), fy(cr - 0.5)) - bil(Gf, fx(cr + 0.5), fy(cr + 0.5)));
+        const rStep = Math.abs(bil(Gr, fx(cr - 0.5), fy(cr - 0.5)) - bil(Gr, fx(cr + 0.5), fy(cr + 0.5)));
+        arcExcess = Math.max(arcExcess, fStep - rStep);
+      }
+      expect(arcExcess).toBeLessThanOrEqual(2);
+
+      // Handoff continuity on the y = inset/2 row: the tile|strip seam (x = rim)
+      // and the additive|mid-edge handoff (x = band, when band > rim) carry no step
+      // beyond their local gradient — the "band suddenly ends" artifact guard.
+      let handover = seamExcess(Gf, rim - 1, ry, rim, ry);
+      if (band > rim) handover = Math.max(handover, seamExcess(Gf, band - 1, ry, band, ry));
+      expect(handover).toBeLessThanOrEqual(2);
+    },
+  );
+
+  it("USER regression: inset 12 / CR 32 / band 50, aurora, ringAlpha 1.0, pastel 0.12 (dark) — pocket filled", () => {
+    // The exact screenshot-verified bug case. Before the fix the pockets rendered
+    // dark (tip ≈ 8 → essentially unlit); after, every corner's pocket is filled.
+    const rim = 44, band = 50;
+    const Gf = compositeAlpha(
+      settleTiles({
+        palette: { background: "dark", stops: EDGE_AURA_PALETTES.aurora, ringAlpha: 1.0, pastel: 0.12, normalize: false },
+        geometry: { inset: 12, cornerRadius: 32, band, cornerFill: true },
+      }),
+      band, rim,
+    );
+    // TL tip + centroid (mid-diagonal between arc and tip) are comfortably lit.
+    const tip = at(Gf, 0, 0);
+    const centroid = diagAt(Gf, rim, (32 + rim * Math.SQRT2) / 2);
+    expect(tip).toBeGreaterThanOrEqual(8);
+    expect(centroid).toBeGreaterThan(40);
+    expect(centroid).toBeGreaterThan(tip); // decays outward toward the tip
+
+    // All FOUR physical screen-corner tips are lit (not just TL).
+    const bufs = settleTiles({
+      palette: { background: "dark", stops: EDGE_AURA_PALETTES.aurora, ringAlpha: 1.0, pastel: 0.12, normalize: false },
+      geometry: { inset: 12, cornerRadius: 32, band, cornerFill: true },
+    });
+    const tips = [
+      bufs[4][(0 * rim + 0) * 4 + 3],                       // TL (0,0)
+      bufs[5][(0 * rim + (rim - 1)) * 4 + 3],               // TR (rim-1,0)
+      bufs[6][((rim - 1) * rim + (rim - 1)) * 4 + 3],       // BR (rim-1,rim-1)
+      bufs[7][((rim - 1) * rim + 0) * 4 + 3],               // BL (0,rim-1)
+    ];
+    for (const t of tips) expect(t).toBeGreaterThanOrEqual(8);
+  });
+});
+
 describe("corner bent-tube: multi-source additive light (v0.4.2)", () => {
   // The round corner is rendered by the MULTI-SOURCE ADDITIVE model: every pixel
   // in a corner neighbourhood combines the geometric coverage of the three tube

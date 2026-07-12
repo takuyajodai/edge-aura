@@ -636,9 +636,11 @@ const CORNER_FEATHER_PX = 1.5;
 // CORNER_FILL so round mode stays byte-identical: (1) the outward feather that
 // rounds the tile silhouette off past the arc is dropped, and (2) the arc branch
 // is allowed to reach across the exterior POCKET (out to POCKET_ARC_FLOOR, deep
-// enough to touch the physical corner tip) with its OUTWARD GAUSSIAN — so the
-// pocket glows continuously from the tube and decays toward the tip. Everything
-// else — centerline, bend, interior, S1–S5 — is identical to round mode.
+// enough to touch the physical corner tip) with its OUTWARD GAUSSIAN, whose sigma
+// is floored to the pocket's real size (σ ≥ tipDist / POCKET_K) so the glow
+// actually reaches the tip instead of dying ~tipDist px short on large corners —
+// so the pocket glows continuously from the tube and decays toward the tip.
+// Everything else — centerline, bend, interior, S1–S5 — is identical to round mode.
 //
 // LONG_FADE (below) is the px over which a straight branch's contribution is
 // windowed off PAST its segment endpoint, as the tube bends into the arc — so a
@@ -769,6 +771,33 @@ const p3Norm = (sumP: number): number => {
 // ceiling on both backgrounds with headroom. (The task's illustrative 1.35 was
 // measured too high: it pushes light to +45–57 %.)
 const S3_MAX_GAIN = 1.1;
+
+// cornerFill pocket outward-falloff scale. The exterior pocket's farthest lit
+// point is the physical corner TIP, at outward distance tipDist = RIM·√2 − CR
+// beyond the arc (RIM = INSET + CR). The ARC branch's own OUTWARD bloom sigma is
+// the band-scaled bloom width (sb ∈ [SB_CLAMP_LO, SB_CLAMP_HI]), which on large
+// geometries decays to nothing long before the tip — leaving the pocket DARK
+// (the reported v0.5 bug: at CR 32 / band 50 the pocket σ ≈ 10 px dies ~30 px
+// short of the tip). In fill mode the ARC's outward sigma is therefore lower-
+// bounded by tipDist / POCKET_K so the tip keeps clearly visible luminance. The
+// arc is the pocket's sole deep-fill source: along the diagonal and in the delta
+// zone near the L-intersection (INSET, INSET) BOTH straights are longitudinally
+// windowed off (hWlon/vWlon → 0 past their tangents, ≈ CR px before the tip), so
+// widening the arc alone fills the whole pocket. The straights are deliberately
+// left at their raw outward sigma — flooring them would brighten the outward
+// EDGE margins inside the tile but NOT in the mid-edge strips (writeNeonPixel has
+// no floor), producing a visible "band suddenly ends" step at the tile↔strip /
+// additive↔mid-edge handoff when BAND ≤ RIM (measured: seam excess up to
+// ~130/255; arc-only keeps every handoff at 0). TUNED BY MEASUREMENT (the
+// "pocket-fill geometry matrix" test, dark seed 42, inset {3,8,12} × CR
+// {6,16,32,40} × band {34,76,120}): at 1.7 the corner tip holds ≥ 0.35× the
+// arc's outward-edge (FWHM) alpha (worst 0.41) and ≥ 8/255 absolute (worst 45)
+// across the whole matrix, the integer-diagonal decay stays strictly monotone
+// (tip < centroid < arc edge), and every seam handoff carries no step beyond its
+// local gradient. The floor is a LOWER BOUND only — where the arc's own sigma is
+// already wider it is untouched — and it only widens the outward Gaussian for
+// t > 0, so the aT = 0 arc crossing (exp(0) = 1 on both sides) stays seamless.
+const POCKET_K = 1.7;
 
 function projectToEdge(x: number, y: number, W: number, H: number): { x: number; y: number } {
   const dl = x, dr = W - x, dt = y, db = H - y;
@@ -1003,6 +1032,13 @@ export function createAuraEngine(
   // deepest outward point in the RIM×RIM tile, at aT = CR − RIM·√2). The pocket
   // glow decays across it toward the tip — see addNeonPixel.
   let POCKET_ARC_FLOOR = 0;
+  // Pocket outward-falloff floor (fill mode): 2σ² denominator lower bound applied
+  // to the ARC branch's OUTWARD bloom Gaussian so the exterior pocket stays lit
+  // out to the physical corner tip (σ ≥ tipDist / POCKET_K; see POCKET_K). 0 in
+  // round mode and whenever tipDist ≤ 0, making the floor inert (the raw sigma
+  // always wins), so nothing outside fill mode's pocket ever changes. Only the
+  // arc is floored — the straights keep their raw outward sigma (see POCKET_K).
+  let POCKET_BLOOM_DEN_MIN = 0;
   // Longitudinal fade length (px) for a straight branch past its segment end.
   let LONG_FADE = 1;
 
@@ -1112,6 +1148,15 @@ export function createAuraEngine(
     LONG_FADE = Math.max(2, CR);
     ARC_FLOOR = -(INSET + CORNER_FEATHER_PX);
     POCKET_ARC_FLOOR = CR - RIM * Math.SQRT2 - 1;
+    // Fill-mode pocket outward-falloff floor: lower-bound the ARC branch's outward
+    // bloom sigma by tipDist / POCKET_K (tipDist = RIM·√2 − CR = the corner tip's
+    // outward distance beyond the arc), so the pocket stays lit all the way to the
+    // tip on large geometries where the band-scaled bloom sigma alone dies far
+    // short of it. Inert in round mode and when tipDist ≤ 0 (POCKET_BLOOM_DEN_MIN
+    // stays 0, so the raw denominator always wins). See POCKET_K.
+    const tipDist = RIM * Math.SQRT2 - CR;
+    const pocketSigmaMin = CORNER_FILL && tipDist > 0 ? tipDist / POCKET_K : 0;
+    POCKET_BLOOM_DEN_MIN = 2 * pocketSigmaMin * pocketSigmaMin;
 
     // Build the per-corner additive box maps + straight 1D geometry, and
     // (re)allocate the per-frame live-profile stores. All values are pure
@@ -1626,19 +1671,25 @@ export function createAuraEngine(
     covOut = core + bloom;
   };
 
-  // Fill-mode arc branch on the OUTWARD (pocket) side. evalCov clamps the profile
-  // to its flat centerline value past the edge (t → 0) and lets the outward
+  // Fill-mode ARC branch coverage on the OUTWARD (pocket) side. evalCov clamps the
+  // profile to its flat centerline value past the edge (t → 0) and lets the outward
   // feather carve the silhouette; the pocket has NO feather, so instead the arc's
   // coverage must decay with the REAL outward signed distance — its own outward
-  // Gaussian — giving a glow that fades toward the physical corner tip. The
-  // interior side (tIn ≥ 0) is byte-identical to evalCov, so the tube and its
-  // bend are untouched and the aT = 0 tube edge stays seamless (both sides land
-  // on core = Ac, bloom = Ab there).
-  const evalCovArcOut = (tIn: number, prof: Float32Array, o: number): void => {
+  // Gaussian — giving a glow that fades toward the physical corner tip. The bloom
+  // denominator is lower-bounded by POCKET_BLOOM_DEN_MIN (σ ≥ tipDist / POCKET_K)
+  // so the falloff scales with the pocket's real size and reaches the tip instead
+  // of dying short (the band-scaled sb alone decays to nothing ~tipDist px out on
+  // large geometries). The interior side (tIn ≥ 0) is byte-identical to evalCov, so
+  // the tube and its bend are untouched; the floor only widens the Gaussian for
+  // t > 0, so the aT = 0 tube edge stays seamless (both sides land on core = Ac,
+  // bloom = Ab there). The straights keep their raw outward sigma (evalCov) — see
+  // POCKET_K for why the floor is arc-only.
+  const evalCovOut = (tIn: number, prof: Float32Array, o: number): void => {
     if (tIn >= 0) { evalCov(tIn, prof, o); return; }
     const tt = tIn * tIn;
     coreOut = tt < 40 ? prof[o] * Math.exp(-tt / prof[o + 1]) : 0;
-    covOut = coreOut + prof[o + 2] * Math.exp(-tt / prof[o + 4]);
+    const den = prof[o + 4] > POCKET_BLOOM_DEN_MIN ? prof[o + 4] : POCKET_BLOOM_DEN_MIN;
+    covOut = coreOut + prof[o + 2] * Math.exp(-tt / den);
   };
 
   // Composite one corner pixel by summing the two straight branches
@@ -1723,13 +1774,13 @@ export function createAuraEngine(
     // (≥ bandCut) or far outward. ROUND mode cuts at ARC_FLOOR (past it the
     // outward feather below is already 0) and defers the feather to the final
     // alpha. FILL mode has no feather: it lets the arc reach across the pocket to
-    // POCKET_ARC_FLOOR (the corner tip) via its OUTWARD Gaussian (evalCovArcOut),
-    // so the pocket glows and decays toward the tip. The interior side is
-    // identical in both modes.
+    // POCKET_ARC_FLOOR (the corner tip) via its OUTWARD Gaussian (evalCovOut,
+    // pocket-scaled so it reaches the tip), so the pocket glows and decays toward
+    // the tip. The interior side is identical in both modes.
     const aT = boxArcTIn[kind][ly * BS + lx];
     if (aT > (CORNER_FILL ? POCKET_ARC_FLOOR : ARC_FLOOR) && aT < bandCut) {
       const o = boxArcJ[kind][ly * BS + lx] * NF;
-      if (CORNER_FILL) evalCovArcOut(aT, aProf, o); else evalCov(aT, aProf, o);
+      if (CORNER_FILL) evalCovOut(aT, aProf, o); else evalCov(aT, aProf, o);
       const c = covOut;
       if (c > 0) {
         sumCov += c; sumP += c * c * c; if (c > domCov) domCov = c; sumCoreP += coreOut * coreOut * coreOut;
