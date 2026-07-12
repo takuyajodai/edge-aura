@@ -5,7 +5,7 @@
 
 **[Live demo →](https://edge-aura-xi.vercel.app)**
 
-<img src="https://raw.githubusercontent.com/takuyajodai/edge-aura/main/docs/demo.gif" alt="edge-aura — an organic glow hugging the viewport edges, undulating and reacting to a tap and keystrokes" width="100%">
+<img src="https://raw.githubusercontent.com/takuyajodai/edge-aura/main/docs/demo.png" alt="edge-aura — an organic glow hugging the viewport edges, undulating and reacting to a tap and keystrokes" width="100%">
 
 An organic screen-edge glow, inspired by the ambient edge glows of on-device
 assistants (e.g. Apple's Siri): a rounded-rectangle "neon tube" hugging the
