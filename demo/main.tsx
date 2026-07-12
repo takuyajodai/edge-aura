@@ -84,10 +84,8 @@ function detectTheme(): Theme {
   } catch {
     /* ignore */
   }
-  return typeof matchMedia !== "undefined" &&
-    matchMedia("(prefers-color-scheme: dark)").matches
-    ? "dark"
-    : "light";
+  // Default to dark — the glow reads best there (saved preference wins).
+  return "dark";
 }
 
 // -- Live code-snippet generation ------------------------------------------
@@ -164,7 +162,7 @@ function Demo() {
   const [palette, setPalette] = useState<EdgeAuraPaletteName>("opal");
   const [preset, setPreset] = useState<PresetChoice>("default");
   const [sliders, setSliders] = useState<Sliders>(() => slidersFromPreset("default"));
-  const [cornerFill, setCornerFill] = useState(false);
+  const [cornerFill, setCornerFill] = useState(true);
   const [active, setActive] = useState(true);
   const [typing, setTyping] = useState(false);
   const [savedAt, setSavedAt] = useState(0);
@@ -228,7 +226,7 @@ function Demo() {
   const selectPreset = (choice: PresetChoice) => {
     setPreset(choice);
     setSliders(slidersFromPreset(choice)); // reset sliders to the preset
-    setCornerFill(false); // reset to the engine default
+    setCornerFill(true); // reset to the demo default (filled)
   };
 
   const setSlider = <K extends keyof Sliders>(key: K, value: number) =>
