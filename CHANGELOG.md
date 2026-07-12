@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] - 2026-07-12
+
+### Fixed
+
+- `cornerFill` pockets rendered dark at large `inset`/`cornerRadius` (e.g.
+  inset 12, cornerRadius 32, band 50): the pocket's outward falloff used the
+  band-scaled bloom σ, which decayed to nothing ~30 px short of the corner
+  tip. The arc branch's outward σ is now lower-bounded by
+  `tipDistance / 1.7`, computed per geometry — the pocket fills at every
+  geometry (36-cell inset×radius×band matrix + full-pocket 2D scans: tip
+  ≥ 45/255, no blank "delta" between the straight bands and the curve, no
+  valleys, all seam handovers 0/255). Straights keep their raw σ on purpose
+  (flooring them re-opened a 130/255 mid-edge handoff step). Round mode and
+  defaults stay bit-identical.
+
 ## [0.5.0] - 2026-07-11
 
 ### Changed
