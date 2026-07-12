@@ -133,23 +133,25 @@ export interface EdgeAuraGeometryOptions {
   innerSoftVar?: number;
   innerSigmaMax?: number;
   /**
-   * Fills the square viewport corners with light continuous with the rounded
-   * tube — the bend keeps its `cornerRadius`; the pocket beyond the arc glows
-   * and decays toward the corner tip (default false). With the default rounding,
-   * the corner-exterior region (pixels past the arc, out to the physical square
-   * corner) fades to transparent via the outward feather, giving a beam-style
-   * rounded ring. Set true to instead light that exterior POCKET: the corner
-   * still renders through the EXACT SAME multi-source additive field as round
-   * mode — same centerline, same bend, same S1–S5 behaviour, so `cornerRadius`
-   * bends the tube with radius r identically to round mode — but the outward
-   * feather is dropped and the arc's own outward Gaussian is allowed to reach
-   * across the pocket. The pocket is geometrically close to the wrapping arc and
-   * to both straights' ends, so the additive sum lights it brightly and
-   * continuously from the tube (seamless at the arc by construction — the same
-   * field, no boundary) and its luminance decays toward the physical corner tip
-   * with the real distance field. Larger CR → a rounder bend and a smaller,
-   * brighter pocket; smaller CR → a squarer bend and a larger pocket. Togglable
-   * live via updateOptions.
+   * Fills the square viewport corners solid out to the physical corner tip while
+   * the ring's INNER edge keeps its rounded `cornerRadius` character — think
+   * "outer corner radius 0, inner corner radius `cornerRadius`" (default false).
+   * With the default rounding, the corner-exterior region (pixels past the arc,
+   * out to the physical square corner) fades to transparent via the outward
+   * feather, giving a beam-style rounded ring. Set true to instead fill that
+   * exterior pocket: it is a CRISP BAND-UNION fill — the corner renders as the
+   * union of its two adjacent straight bands, so it is never darker than either
+   * band at equal depth and no dark rectangular pocket can form. Concretely, the
+   * outward pocket (beyond the centerline, out to the tip) is rendered SOLID at
+   * the same near-opaque value a straight's inset outward margin gets — no radial
+   * decay — while the inward dissolve follows min(rounded-path distance, band
+   * distance): near the bend the rounded distance wins so `cornerRadius` still
+   * bends the inner edge, and deeper the band-union takes over so the corner
+   * matches the straights. The CORE still bends on the rounded path (at CR = 0 it
+   * squares off). The palette and per-position noise stay continuous around the
+   * ring, so the pocket is seamless with the tube. Larger CR → a rounder inner
+   * bend and a smaller pocket; smaller CR → a squarer inner bend and a larger
+   * pocket. Togglable live via updateOptions.
    */
   cornerFill?: boolean;
 }
@@ -632,22 +634,38 @@ const CORNER_FEATHER_PX = 1.5;
 // the tube (S3). The additive field is a pure function of position, so ownership
 // boundaries carry no step.
 //
-// cornerFill (opt-in) renders the SAME field with two differences, both keyed on
-// CORNER_FILL so round mode stays byte-identical: (1) the outward feather that
-// rounds the tile silhouette off past the arc is dropped, and (2) the arc branch
-// is allowed to reach across the exterior POCKET (out to POCKET_ARC_FLOOR, deep
-// enough to touch the physical corner tip) with its OUTWARD GAUSSIAN, whose sigma
-// is floored to the pocket's real size (σ ≥ tipDist / POCKET_K) so the glow
-// actually reaches the tip instead of dying ~tipDist px short on large corners —
-// so the pocket glows continuously from the tube and decays toward the tip.
-// Everything else — centerline, bend, interior, S1–S5 — is identical to round mode.
+// cornerFill (opt-in) is a "crisp band-union fill": the corner behaves as the
+// UNION of the two adjacent straight bands, so it is never darker than either
+// band at equal depth and no dark rectangular pocket can form (the rejected v4
+// defect). It reuses the SAME three-branch additive machinery, keyed on
+// CORNER_FILL so round mode stays byte-identical, with three differences:
+//   (1) the two straight branches are NOT longitudinally windowed off toward the
+//       corner (hWlon/vWlon → 1) — each keeps its full band at its own
+//       perpendicular depth (ax for the vertical edge, ay for the horizontal),
+//       so their additive combine ≥ max(band_h(ay), band_v(ax)) ≥ band(min) at
+//       every point: the band-union invariant, by construction;
+//   (2) the arc branch keeps the ROUNDED path distance (evalCov on d_rounded, as
+//       round mode) so cornerRadius still bends the CORE and the near-bend inner
+//       dissolve — the dominant of {cov(ax), cov(ay), cov(d_rounded)} is
+//       cov(min(ax, ay, d_rounded)) = cov(min(d_L, d_rounded)), so the inner
+//       contour rounds where d_rounded < d_L (near the bend, depth < CR) and
+//       squares off to the band union deeper — exactly "outer radius 0, inner
+//       radius cornerRadius"; at CR = 0 the arc degenerates and d_L takes over;
+//   (3) the outward feather is dropped, and every branch clamps its outward side
+//       to the flat centerline value (evalCov's t → 0), so the whole pocket out
+//       to the physical corner tip renders as SOLID margin — crisp fill, exactly
+//       like a straight's near-solid inset outward margin. No radial pocket decay
+//       and no per-size sigma floor (the rejected v0.5.1 machinery is gone).
+// The S3 concentration ceiling (domCov · S3_MAX_GAIN) tracks the dominant branch
+// = cov(min-field), so it is ≥ the band-union level and can never clamp the
+// corner below it. Everything else — S1/S3/S4/S5 — is identical to round mode.
 //
 // LONG_FADE (below) is the px over which a straight branch's contribution is
-// windowed off PAST its segment endpoint, as the tube bends into the arc — so a
-// straight lights the concave bend interior it spills into but not the convex
-// exterior beyond the rounded corner. Derived per geometry (≈ the corner
-// radius) so the handoff to the arc completes within the tile. See
-// deriveGeometry (hWlon/vWlon) and addNeonPixel.
+// windowed off PAST its segment endpoint in ROUND mode, as the tube bends into
+// the arc — so a straight lights the concave bend interior it spills into but not
+// the convex exterior beyond the rounded corner. Derived per geometry (≈ the
+// corner radius) so the handoff to the arc completes within the tile. FILL mode
+// drops the window entirely. See deriveGeometry (hWlon/vWlon) and addNeonPixel.
 
 // ---------------------------------------------------------------------------
 // Internal types
@@ -771,33 +789,6 @@ const p3Norm = (sumP: number): number => {
 // ceiling on both backgrounds with headroom. (The task's illustrative 1.35 was
 // measured too high: it pushes light to +45–57 %.)
 const S3_MAX_GAIN = 1.1;
-
-// cornerFill pocket outward-falloff scale. The exterior pocket's farthest lit
-// point is the physical corner TIP, at outward distance tipDist = RIM·√2 − CR
-// beyond the arc (RIM = INSET + CR). The ARC branch's own OUTWARD bloom sigma is
-// the band-scaled bloom width (sb ∈ [SB_CLAMP_LO, SB_CLAMP_HI]), which on large
-// geometries decays to nothing long before the tip — leaving the pocket DARK
-// (the reported v0.5 bug: at CR 32 / band 50 the pocket σ ≈ 10 px dies ~30 px
-// short of the tip). In fill mode the ARC's outward sigma is therefore lower-
-// bounded by tipDist / POCKET_K so the tip keeps clearly visible luminance. The
-// arc is the pocket's sole deep-fill source: along the diagonal and in the delta
-// zone near the L-intersection (INSET, INSET) BOTH straights are longitudinally
-// windowed off (hWlon/vWlon → 0 past their tangents, ≈ CR px before the tip), so
-// widening the arc alone fills the whole pocket. The straights are deliberately
-// left at their raw outward sigma — flooring them would brighten the outward
-// EDGE margins inside the tile but NOT in the mid-edge strips (writeNeonPixel has
-// no floor), producing a visible "band suddenly ends" step at the tile↔strip /
-// additive↔mid-edge handoff when BAND ≤ RIM (measured: seam excess up to
-// ~130/255; arc-only keeps every handoff at 0). TUNED BY MEASUREMENT (the
-// "pocket-fill geometry matrix" test, dark seed 42, inset {3,8,12} × CR
-// {6,16,32,40} × band {34,76,120}): at 1.7 the corner tip holds ≥ 0.35× the
-// arc's outward-edge (FWHM) alpha (worst 0.41) and ≥ 8/255 absolute (worst 45)
-// across the whole matrix, the integer-diagonal decay stays strictly monotone
-// (tip < centroid < arc edge), and every seam handoff carries no step beyond its
-// local gradient. The floor is a LOWER BOUND only — where the arc's own sigma is
-// already wider it is untouched — and it only widens the outward Gaussian for
-// t > 0, so the aT = 0 arc crossing (exp(0) = 1 on both sides) stays seamless.
-const POCKET_K = 1.7;
 
 function projectToEdge(x: number, y: number, W: number, H: number): { x: number; y: number } {
   const dl = x, dr = W - x, dt = y, db = H - y;
@@ -1027,18 +1018,13 @@ export function createAuraEngine(
   // is fully faded (contributes 0) — the early-out in addNeonPixel. Past it the
   // outward feather is already exactly 0, so the cut is free. = −(INSET+feather).
   let ARC_FLOOR = 0;
-  // Pocket floor (fill mode): the arc's outward Gaussian is allowed to reach this
-  // deep on the exterior side, enough to cover the physical corner tip (the
-  // deepest outward point in the RIM×RIM tile, at aT = CR − RIM·√2). The pocket
-  // glow decays across it toward the tip — see addNeonPixel.
+  // Pocket floor (fill mode): the arc branch is included this deep on the exterior
+  // side, enough to cover the physical corner tip (the deepest outward point in
+  // the RIM×RIM tile, at aT = CR − RIM·√2), so the arc's ring-continuous colour
+  // reaches the tip. Its coverage there is the flat centerline value (evalCov
+  // clamps t → 0 outward), so the whole pocket renders as solid margin — see
+  // addNeonPixel.
   let POCKET_ARC_FLOOR = 0;
-  // Pocket outward-falloff floor (fill mode): 2σ² denominator lower bound applied
-  // to the ARC branch's OUTWARD bloom Gaussian so the exterior pocket stays lit
-  // out to the physical corner tip (σ ≥ tipDist / POCKET_K; see POCKET_K). 0 in
-  // round mode and whenever tipDist ≤ 0, making the floor inert (the raw sigma
-  // always wins), so nothing outside fill mode's pocket ever changes. Only the
-  // arc is floored — the straights keep their raw outward sigma (see POCKET_K).
-  let POCKET_BLOOM_DEN_MIN = 0;
   // Longitudinal fade length (px) for a straight branch past its segment end.
   let LONG_FADE = 1;
 
@@ -1142,21 +1128,13 @@ export function createAuraEngine(
     // is ~half-on at the arc midpoint (feeds the bend interior — S3) and off by the
     // far tangent (no convex over-light). ARC_FLOOR is the round-mode fully-faded
     // arc cutoff; POCKET_ARC_FLOOR lets fill mode's arc reach the corner tip (the
-    // deepest outward point in the tile is at aT = CR − RIM·√2), so the exterior
-    // pocket glows and decays toward the tip.
+    // deepest outward point in the tile is at aT = CR − RIM·√2), so the arc's
+    // ring-continuous colour reaches the tip (its coverage there is the flat
+    // centerline value — the pocket is solid, filled by the two straights too).
     BS = Math.max(1, RIM, BAND);
     LONG_FADE = Math.max(2, CR);
     ARC_FLOOR = -(INSET + CORNER_FEATHER_PX);
     POCKET_ARC_FLOOR = CR - RIM * Math.SQRT2 - 1;
-    // Fill-mode pocket outward-falloff floor: lower-bound the ARC branch's outward
-    // bloom sigma by tipDist / POCKET_K (tipDist = RIM·√2 − CR = the corner tip's
-    // outward distance beyond the arc), so the pocket stays lit all the way to the
-    // tip on large geometries where the band-scaled bloom sigma alone dies far
-    // short of it. Inert in round mode and when tipDist ≤ 0 (POCKET_BLOOM_DEN_MIN
-    // stays 0, so the raw denominator always wins). See POCKET_K.
-    const tipDist = RIM * Math.SQRT2 - CR;
-    const pocketSigmaMin = CORNER_FILL && tipDist > 0 ? tipDist / POCKET_K : 0;
-    POCKET_BLOOM_DEN_MIN = 2 * pocketSigmaMin * pocketSigmaMin;
 
     // Build the per-corner additive box maps + straight 1D geometry, and
     // (re)allocate the per-frame live-profile stores. All values are pure
@@ -1671,35 +1649,15 @@ export function createAuraEngine(
     covOut = core + bloom;
   };
 
-  // Fill-mode ARC branch coverage on the OUTWARD (pocket) side. evalCov clamps the
-  // profile to its flat centerline value past the edge (t → 0) and lets the outward
-  // feather carve the silhouette; the pocket has NO feather, so instead the arc's
-  // coverage must decay with the REAL outward signed distance — its own outward
-  // Gaussian — giving a glow that fades toward the physical corner tip. The bloom
-  // denominator is lower-bounded by POCKET_BLOOM_DEN_MIN (σ ≥ tipDist / POCKET_K)
-  // so the falloff scales with the pocket's real size and reaches the tip instead
-  // of dying short (the band-scaled sb alone decays to nothing ~tipDist px out on
-  // large geometries). The interior side (tIn ≥ 0) is byte-identical to evalCov, so
-  // the tube and its bend are untouched; the floor only widens the Gaussian for
-  // t > 0, so the aT = 0 tube edge stays seamless (both sides land on core = Ac,
-  // bloom = Ab there). The straights keep their raw outward sigma (evalCov) — see
-  // POCKET_K for why the floor is arc-only.
-  const evalCovOut = (tIn: number, prof: Float32Array, o: number): void => {
-    if (tIn >= 0) { evalCov(tIn, prof, o); return; }
-    const tt = tIn * tIn;
-    coreOut = tt < 40 ? prof[o] * Math.exp(-tt / prof[o + 1]) : 0;
-    const den = prof[o + 4] > POCKET_BLOOM_DEN_MIN ? prof[o + 4] : POCKET_BLOOM_DEN_MIN;
-    covOut = coreOut + prof[o + 2] * Math.exp(-tt / den);
-  };
-
   // Composite one corner pixel by summing the two straight branches
   // and the arc branch (energy-weighted colour + env, whitened by total core).
   // (lx, ly) are box-local coords for corner `kind`; (px, py) global, for
-  // dither. Straight branches carry a longitudinal window that fades them off
-  // past their segment endpoint (hWlon/vWlon); the arc's CAPSULE distance decays
-  // into the interior on its own. The coverages are summed and clamped to 1
-  // BEFORE the intensity / dark-gamma / dither stages, so those are untouched.
-  // Returns the pre-dither alpha.
+  // dither. In ROUND mode the straight branches carry a longitudinal window that
+  // fades them off past their segment endpoint (hWlon/vWlon); FILL mode drops the
+  // window (each straight keeps its full band → the band-union fill). The arc's
+  // CAPSULE distance decays into the interior on its own. The coverages are summed
+  // and clamped to 1 BEFORE the intensity / dark-gamma / dither stages, so those
+  // are untouched. Returns the pre-dither alpha.
   //
   // applyFeather (ROUND mode, the TILE only): the corner tile IS the arc section
   // of the tube, so its outward silhouette is the arc's feather — applied as a
@@ -1709,7 +1667,8 @@ export function createAuraEngine(
   // so the interior brightening (S3) and the tile↔strip boundary (feather 1
   // there) are untouched. Strips pass false: the owning straight IS the tube and
   // never reaches the outward feather. FILL mode ignores applyFeather entirely
-  // (see the outwardFade block) — its lit pocket replaces the rounded silhouette.
+  // (see the outwardFade block) — the branches' flat outward value fills the
+  // pocket solid instead of rounding the silhouette off.
   const addNeonPixel = (
     data: Uint8ClampedArray,
     idx: number,
@@ -1745,8 +1704,10 @@ export function createAuraEngine(
     const bandCut = BAND - INSET;
 
     // Horizontal-edge straight branch: depth by row, live profile + window by
-    // column. wH = 0 well past the segment end → the straight vanishes.
-    const wH = hWlon[kind][lx];
+    // column. In ROUND mode wH = 0 well past the segment end → the straight
+    // vanishes into the arc; FILL mode drops the window (wH = 1) so the full band
+    // extends into the corner — the band-union fill (never darker than the band).
+    const wH = CORNER_FILL ? 1 : hWlon[kind][lx];
     if (wH > 0 && hTIn[kind][ly] < bandCut) {
       const o = lx * NF;
       evalCov(hTIn[kind][ly], hProf, o);
@@ -1757,8 +1718,8 @@ export function createAuraEngine(
         envAcc += c * hProf[o + 8];
       }
     }
-    // Vertical-edge straight branch.
-    const wV = vWlon[kind][ly];
+    // Vertical-edge straight branch (window dropped in FILL mode, as above).
+    const wV = CORNER_FILL ? 1 : vWlon[kind][ly];
     if (wV > 0 && vTIn[kind][lx] < bandCut) {
       const o = ly * NF;
       evalCov(vTIn[kind][lx], vProf, o);
@@ -1769,18 +1730,20 @@ export function createAuraEngine(
         envAcc += c * vProf[o + 8];
       }
     }
-    // Arc branch: capsule signed distance to the arc curve (self-decaying into
-    // the interior, no window). Skipped once it is negligible deep inward
-    // (≥ bandCut) or far outward. ROUND mode cuts at ARC_FLOOR (past it the
-    // outward feather below is already 0) and defers the feather to the final
-    // alpha. FILL mode has no feather: it lets the arc reach across the pocket to
-    // POCKET_ARC_FLOOR (the corner tip) via its OUTWARD Gaussian (evalCovOut,
-    // pocket-scaled so it reaches the tip), so the pocket glows and decays toward
-    // the tip. The interior side is identical in both modes.
+    // Arc branch: capsule signed distance to the arc curve — the ROUNDED path
+    // distance (self-decaying into the interior, no window). This is what bends
+    // the core and the near-bend inner dissolve with cornerRadius in BOTH modes.
+    // Skipped once negligible deep inward (≥ bandCut) or far outward. ROUND mode
+    // cuts at ARC_FLOOR (past it the outward feather below is already 0) and
+    // defers the feather to the final alpha. FILL mode has no feather: it includes
+    // the arc across the pocket to POCKET_ARC_FLOOR (the corner tip) so the arc's
+    // ring-continuous colour reaches the tip; its coverage there is the flat
+    // centerline value (evalCov clamps t → 0 outward), filling the pocket solid.
+    // The eval is identical (evalCov, d_rounded) in both modes.
     const aT = boxArcTIn[kind][ly * BS + lx];
     if (aT > (CORNER_FILL ? POCKET_ARC_FLOOR : ARC_FLOOR) && aT < bandCut) {
       const o = boxArcJ[kind][ly * BS + lx] * NF;
-      if (CORNER_FILL) evalCovOut(aT, aProf, o); else evalCov(aT, aProf, o);
+      evalCov(aT, aProf, o);
       const c = covOut;
       if (c > 0) {
         sumCov += c; sumP += c * c * c; if (c > domCov) domCov = c; sumCoreP += coreOut * coreOut * coreOut;
@@ -1792,8 +1755,8 @@ export function createAuraEngine(
     if (sumCov <= 0) return 0; // empty pixel (avoid 1/sumCov div-by-zero)
     // Outward feather (ROUND-mode tile silhouette), applied post-gamma like the
     // old single-source outwardFade: 1 inside the tube, ramping to 0 past the
-    // arc. FILL mode never feathers — the pocket is lit instead — so the whole
-    // block is skipped there (its outward-decayed arc carries the falloff).
+    // arc. FILL mode never feathers — the branches' flat outward value fills the
+    // pocket solid instead — so the whole block is skipped there.
     let outwardFade = 1;
     if (!CORNER_FILL && applyFeather && aT < 0) {
       const aOut = -aT;
