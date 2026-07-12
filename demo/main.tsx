@@ -27,6 +27,7 @@ import {
   type SegmentedOption,
 } from "./ui";
 import { detectLang, STRINGS, type Lang } from "./i18n";
+import { version } from "../package.json";
 import "./styles.css";
 
 const REPO_URL = "https://github.com/takuyajodai/edge-aura";
@@ -559,10 +560,13 @@ function Demo() {
             <span className="made-by-prefix">{t.madeBy}</span>{" "}
             <span className="made-by-name">Takuya Jodai</span>
           </a>
-          <a href={REPO_URL} target="_blank" rel="noreferrer noopener">
-            <GitHubIcon />
-            <span>{t.repo}</span>
-          </a>
+          <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+            <span className="footer-version">v{version}</span>
+            <a href={REPO_URL} target="_blank" rel="noreferrer noopener">
+              <GitHubIcon />
+              <span>{t.repo}</span>
+            </a>
+          </div>
         </footer>
       </div>
     </>

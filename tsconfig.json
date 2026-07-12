@@ -9,6 +9,7 @@
     "noUncheckedIndexedAccess": false,
     "skipLibCheck": true,
     "isolatedModules": true,
+    "resolveJsonModule": true,
     "noEmit": true,
     "types": ["node"],
     "paths": {
