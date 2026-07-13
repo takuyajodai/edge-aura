@@ -324,15 +324,17 @@ function Demo() {
       </a>
 
       {/* Full-viewport, click-through overlay: the page's own glowing edge.
-          Height overrides (vs the component's default `inset: 0`): on iOS
-          Safari the layout viewport stops at the translucent toolbars, so an
-          inset-anchored layer leaves the glow short of the physical screen
-          edges visible through them. With viewport-fit=cover (index.html),
-          top: 0 is the physical top, and 100lvh (large viewport = toolbars
-          collapsed) reaches the physical bottom regardless of toolbar state —
-          also sparing a canvas realloc on every toolbar collapse/expand.
-          minHeight is the no-lvh fallback: if the height is dropped, the
-          wrapper (bottom: auto) would otherwise collapse to 0. */}
+          Deliberately the component's default `inset: 0` (hugs the dynamic
+          viewport). Verified in the iOS 26 simulator: Safari 26 ignores
+          viewport-fit=cover in-browser (safe-area insets stay 0) and hard-
+          clips composited layers — fixed AND sticky alike — at the current
+          viewport edge, so any layer taller than the viewport (100lvh) ends
+          in a crisp cut line at the toolbar. Hugging the viewport instead
+          lets the band's own soft falloff meet the edge, and Safari's
+          automatic background extension carries the page's edge pixels on
+          under the translucent bars. viewport-fit=cover stays in index.html:
+          pre-26 Safari and standalone/PWA DO honor it, and there this same
+          default wrapper reaches the physical screen edges. */}
       <EdgeAura
         key={entranceKey}
         state={typing ? "typing" : "idle"}
@@ -341,7 +343,7 @@ function Demo() {
         active={active}
         options={options}
         kindleOrigin={kindleOrigin}
-        style={{ zIndex: 60, bottom: "auto", height: "100lvh", minHeight: "100vh" }}
+        style={{ zIndex: 60 }}
       />
 
       {/* Header lives OUTSIDE .page so its scrolled background + hairline
