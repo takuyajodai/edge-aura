@@ -3,7 +3,7 @@
 [![npm version](https://img.shields.io/npm/v/edge-aura.svg)](https://www.npmjs.com/package/edge-aura)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 
-**[Live demo →](https://edge-aura-xi.vercel.app)**
+**[Live demo →](https://edge-aura.js.org)**
 
 <img src="https://raw.githubusercontent.com/takuyajodai/edge-aura/main/docs/demo.png" alt="edge-aura — an organic glow hugging the viewport edges, undulating and reacting to a tap and keystrokes" width="100%">
 
@@ -320,7 +320,7 @@ Disable with `palette: { normalize: false }`, or retune via
 
 ## Demo
 
-Hosted: **https://edge-aura-xi.vercel.app** (`edge-aura.js.org` pending) ·
+Hosted: **https://edge-aura.js.org** ·
 [Open in StackBlitz](https://stackblitz.com/github/takuyajodai/edge-aura/tree/main/examples/basic)
 
 ```sh

@@ -1,6 +1,6 @@
 {
   "name": "edge-aura",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "description": "Organic screen-edge glow — framework-agnostic Canvas 2D engine with spring physics, palette LUT, and a thin React adapter.",
   "keywords": [
     "glow",
@@ -19,7 +19,7 @@
     "type": "git",
     "url": "git+https://github.com/takuyajodai/edge-aura.git"
   },
-  "homepage": "https://edge-aura-xi.vercel.app",
+  "homepage": "https://edge-aura.js.org",
   "bugs": "https://github.com/takuyajodai/edge-aura/issues",
   "type": "module",
   "sideEffects": false,
