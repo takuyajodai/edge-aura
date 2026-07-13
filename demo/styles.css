@@ -114,7 +114,12 @@ a {
   z-index: 1;
   max-width: 760px;
   margin: 0 auto;
-  padding: 0 24px 96px;
+  /* Safe-area aware (viewport-fit=cover): keep the footer above the home
+     indicator and the column clear of landscape notches. */
+  padding: 0
+    max(24px, env(safe-area-inset-right, 0px))
+    calc(96px + env(safe-area-inset-bottom, 0px))
+    max(24px, env(safe-area-inset-left, 0px));
 }
 
 /* -- Header --------------------------------------------------------------- */
@@ -130,6 +135,10 @@ a {
   top: 0;
   z-index: 20;
   background: transparent;
+  /* viewport-fit=cover puts the sticky top at the physical screen top; keep
+     the header content below the status bar / notch while the scrolled
+     panel background still bleeds under it. */
+  padding-top: env(safe-area-inset-top, 0px);
   transition: background var(--dur) var(--ease),
     box-shadow var(--dur) var(--ease), backdrop-filter var(--dur) var(--ease);
 }
@@ -140,7 +149,8 @@ a {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 26px 24px 20px;
+  padding: 26px max(24px, env(safe-area-inset-right, 0px)) 20px
+    max(24px, env(safe-area-inset-left, 0px));
   transition: padding var(--dur) var(--ease);
 }
 /* Scrolled: page content would collide with the floating text — fade in a
@@ -154,7 +164,8 @@ a {
 .site-header.is-scrolled .site-header-inner {
   /* Optically asymmetric: the aura band consumes the top edge and Ramaraja's
      glyphs sit low in their line box, so equal padding reads top-tight. */
-  padding: 17px 24px 9px;
+  padding: 17px max(24px, env(safe-area-inset-right, 0px)) 9px
+    max(24px, env(safe-area-inset-left, 0px));
 }
 
 .wordmark {

@@ -323,7 +323,16 @@ function Demo() {
         {t.skipToContent}
       </a>
 
-      {/* Full-viewport, click-through overlay: the page's own glowing edge. */}
+      {/* Full-viewport, click-through overlay: the page's own glowing edge.
+          Height overrides (vs the component's default `inset: 0`): on iOS
+          Safari the layout viewport stops at the translucent toolbars, so an
+          inset-anchored layer leaves the glow short of the physical screen
+          edges visible through them. With viewport-fit=cover (index.html),
+          top: 0 is the physical top, and 100lvh (large viewport = toolbars
+          collapsed) reaches the physical bottom regardless of toolbar state —
+          also sparing a canvas realloc on every toolbar collapse/expand.
+          minHeight is the no-lvh fallback: if the height is dropped, the
+          wrapper (bottom: auto) would otherwise collapse to 0. */}
       <EdgeAura
         key={entranceKey}
         state={typing ? "typing" : "idle"}
@@ -332,7 +341,7 @@ function Demo() {
         active={active}
         options={options}
         kindleOrigin={kindleOrigin}
-        style={{ zIndex: 60 }}
+        style={{ zIndex: 60, bottom: "auto", height: "100lvh", minHeight: "100vh" }}
       />
 
       {/* Header lives OUTSIDE .page so its scrolled background + hairline
