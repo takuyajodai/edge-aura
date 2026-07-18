@@ -44,8 +44,29 @@ import { EdgeAura, type EdgeAuraHandle } from "../src/react";
 // Controllable environment: recording rAF + prefers-reduced-motion switch.
 // ---------------------------------------------------------------------------
 const pendingRaf = new Set<number>();
+// id → callback, so tests can drive the loop by invoking scheduled frames with
+// controlled timestamps (the tick reads its `now` arg, not performance.now()).
+const rafCallbacks = new Map<number, FrameRequestCallback>();
 let nextRafId = 1;
 let prmMatches = false;
+// Controllable performance.now(): start()/the event handlers read it, so tests
+// keep it in lock-step with the frame timestamps they pass to flushFrame().
+let perfNow = 0;
+
+/**
+ * Invoke every currently-pending rAF callback with `now` (the tick reschedules
+ * itself first, so each call enqueues the next frame — the snapshot taken here
+ * excludes it). Also advances the mocked performance.now() clock to `now`.
+ */
+function flushFrame(now: number): void {
+  perfNow = now;
+  const due = [...rafCallbacks].filter(([id]) => pendingRaf.has(id));
+  for (const [id, cb] of due) {
+    pendingRaf.delete(id);
+    rafCallbacks.delete(id);
+    cb(now);
+  }
+}
 // jsdom exposes `document.hidden` / `visibilityState` as prototype getters; we
 // override them with a module-var-backed getter so tests can flip tab
 // visibility and dispatch the matching event. shouldRun() reads document.hidden.
@@ -60,9 +81,12 @@ function setVisibility(hidden: boolean): void {
 beforeEach(() => {
   vi.clearAllMocks();
   pendingRaf.clear();
+  rafCallbacks.clear();
   nextRafId = 1;
   prmMatches = false;
   docHidden = false;
+  perfNow = 0;
+  vi.spyOn(performance, "now").mockImplementation(() => perfNow);
   Object.defineProperty(document, "hidden", {
     configurable: true,
     get: () => docHidden,
@@ -72,13 +96,15 @@ beforeEach(() => {
     get: () => (docHidden ? "hidden" : "visible"),
   });
 
-  globalThis.requestAnimationFrame = ((_cb: FrameRequestCallback) => {
+  globalThis.requestAnimationFrame = ((cb: FrameRequestCallback) => {
     const id = nextRafId++;
     pendingRaf.add(id);
+    rafCallbacks.set(id, cb);
     return id;
   }) as typeof requestAnimationFrame;
   globalThis.cancelAnimationFrame = ((id: number) => {
     pendingRaf.delete(id);
+    rafCallbacks.delete(id);
   }) as typeof cancelAnimationFrame;
 
   // jsdom has no matchMedia; `matches` is read at call time so tests can set
@@ -360,6 +386,73 @@ describe("imperative kindle handle", () => {
     unmount();
     expect(() => handle.kindle(5, 5)).not.toThrow();
     expect(mockEngine.kindle).not.toHaveBeenCalled();
+  });
+});
+
+describe("quiescent-rate throttle", () => {
+  // The default 20 fps window is 1000/20 = 50 ms; QUIESCE_AFTER_MS is 5000 ms.
+  // flushFrame(now) drives the loop with a controlled timestamp; performance.now
+  // is mocked so the mount clock, activity stamps, and frame times all agree.
+
+  it("skips frames while quiescent, then steps with the accumulated dt", () => {
+    render(<EdgeAura />);
+    // 6000 ms > QUIESCE_AFTER_MS since mount → quiescent, but the huge dt is far
+    // past the 50 ms window so this frame still renders and anchors `last`.
+    flushFrame(6000);
+    const steps = mockEngine.step.mock.calls.length;
+    const renders = mockEngine.render.mock.calls.length;
+
+    flushFrame(6008); // +8 ms — inside the 50 ms window → skipped
+    flushFrame(6016); // +8 ms more — still inside → skipped
+    expect(mockEngine.step.mock.calls.length).toBe(steps);
+    expect(mockEngine.render.mock.calls.length).toBe(renders);
+
+    flushFrame(6066); // 66 ms since the last render → window elapsed → renders
+    expect(mockEngine.step.mock.calls.length).toBe(steps + 1);
+    expect(mockEngine.render.mock.calls.length).toBe(renders + 1);
+    // The step receives the FULL elapsed time, including the two skipped frames.
+    const stepCalls = mockEngine.step.mock.calls;
+    const lastDt = stepCalls[stepCalls.length - 1][0] as number;
+    expect(lastDt).toBeCloseTo(66, 5);
+  });
+
+  it("restores full rate immediately after an activity event (aura:tap)", () => {
+    render(<EdgeAura />);
+    flushFrame(6000); // quiescent anchor
+    const steps = mockEngine.step.mock.calls.length;
+
+    // A tap stamps activity at performance.now() — align it with the clock.
+    perfNow = 6000;
+    window.dispatchEvent(new CustomEvent("aura:tap", { detail: { x: 1, y: 2 } }));
+
+    // Both close-spaced frames are within QUIESCE_AFTER_MS of the tap, so
+    // neither is quiescent — every frame renders.
+    flushFrame(6008);
+    flushFrame(6016);
+    expect(mockEngine.step.mock.calls.length).toBe(steps + 2);
+  });
+
+  it("quiescentFps={false} disables skipping entirely", () => {
+    render(<EdgeAura quiescentFps={false} />);
+    flushFrame(6000);
+    const steps = mockEngine.step.mock.calls.length;
+    flushFrame(6008); // would be skipped at the default fps — but throttling is off
+    flushFrame(6016);
+    expect(mockEngine.step.mock.calls.length).toBe(steps + 2);
+  });
+
+  it("a savedAt change during quiescence pulses and renders on that very frame", () => {
+    const { rerender } = render(<EdgeAura savedAt={0} />);
+    flushFrame(6000); // quiescent anchor
+    const steps = mockEngine.step.mock.calls.length;
+    expect(mockEngine.pulse).not.toHaveBeenCalled();
+
+    rerender(<EdgeAura savedAt={123} />); // new non-zero marker
+    // +8 ms would normally be skipped, but the savedAt pulse detection runs
+    // first, stamps activity, and forces the frame to render immediately.
+    flushFrame(6008);
+    expect(mockEngine.pulse).toHaveBeenCalledTimes(1);
+    expect(mockEngine.step.mock.calls.length).toBe(steps + 1);
   });
 });
 

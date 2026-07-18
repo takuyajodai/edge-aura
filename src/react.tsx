@@ -80,6 +80,23 @@ export interface EdgeAuraProps {
    */
   active?: boolean;
   /**
+   * Throttled frame rate (fps) while the effect is "quiescent" — idle
+   * (`state !== "typing"`) with no energy or config input for the last few
+   * seconds. Default 20. At the idle rotation the per-frame delta stays below
+   * the perceptual threshold (the default 8 s/rev drift advances ~2.3° of hue
+   * angle per 20 fps frame — across a soft gradient with no sharp angular
+   * features), so the throttle is visually indistinguishable from full rate while
+   * roughly halving the rAF wakeups on a 60 Hz panel (more on 120 Hz) — it
+   * exists purely to spare battery and low-end hardware. ANY input restores
+   * full rate for a grace window (tap / key / save pulse, a `state` / `palette`
+   * / `options` change, a kindle, or a resize). Numeric values are clamped up
+   * to a sane floor (5 fps); pass `false` to opt out and always run at full
+   * display rate. Never affects the reduced-motion / hidden-tab /
+   * `active={false}` paths — those stop the loop entirely, so there is nothing
+   * to throttle.
+   */
+  quiescentFps?: number | false;
+  /**
    * Prefix for the window CustomEvent channel: the component listens to
    * `${prefix}:tap`, `${prefix}:key`, `${prefix}:saved-pulse`.
    * Default "aura".
@@ -121,6 +138,36 @@ const WRAPPER_STYLE: CSSProperties = {
   inset: 0,
   pointerEvents: "none",
 };
+
+// -- Quiescent-rate throttle (issue #3) ------------------------------------
+// Default throttled frame rate while the effect is "quiescent" (see below). At
+// the idle rotation the per-frame delta stays below the perceptual threshold
+// (the default 8 s/rev drift is ~2.3° of hue angle per 20 fps frame, across a
+// soft gradient with no sharp angular features), so 20 fps is visually
+// indistinguishable from full rate yet roughly halves the rAF wakeups on a
+// 60 Hz panel — more on 120 Hz — purely to spare battery and low-end hardware.
+const DEFAULT_QUIESCENT_FPS = 20;
+// Floor so a misconfigured prop can never stall the ring to a slideshow (or, at
+// fps ≤ 0, divide the throttle window by zero). 5 fps (200 ms) is the slowest we
+// ever run while nominally "animating".
+const MIN_QUIESCENT_FPS = 5;
+// Grace period after the last energy/config input before the loop may throttle.
+// The engine's slowest energy store decays at 1.1/s (tap), so a swell is
+// ~e^-5.5 ≈ 0.4% of peak after 5 s — imperceptible — and the 0.85 s kindle
+// wavefront and 0.35 s palette crossfade both finish far inside this window.
+// Deliberately larger than any transient so swells, gliding hotspots and the
+// kindle never render at reduced rate; only the truly steady ring is throttled.
+const QUIESCE_AFTER_MS = 5000;
+
+// Resolve the `quiescentFps` prop to either `false` (throttling off) or a
+// clamped positive fps. Non-finite / ≤ floor values snap to the floor rather
+// than disabling throttling; only an explicit `false` opts out.
+function resolveQuiescentFps(v: number | false): number | false {
+  if (v === false) return false;
+  return Number.isFinite(v)
+    ? Math.max(MIN_QUIESCENT_FPS, v)
+    : DEFAULT_QUIESCENT_FPS;
+}
 
 // Resolve a preset name to its stop array; raw stop arrays pass through.
 // (The engine validates the stops structurally at creation/setPalette time.)
@@ -203,6 +250,7 @@ export function EdgeAura({
   options,
   palette,
   active = true,
+  quiescentFps = DEFAULT_QUIESCENT_FPS,
   eventPrefix = "aura",
   kindleOrigin = null,
   className,
@@ -226,6 +274,13 @@ export function EdgeAura({
   // without widening the main effect's dependency array.
   const activeRef   = useRef(active);
   const syncLoopRef = useRef<(() => void) | null>(null);
+  // Resolved (clamped, or `false`) quiescent fps for the tick's throttle, kept
+  // in a ref so the [eventPrefix] loop closure sees prop changes without a
+  // remount. `lastActivityAt` is stamped `performance.now()` on every energy or
+  // config input (see the stamp sites below); the tick treats the ring as
+  // quiescent only once QUIESCE_AFTER_MS has elapsed since the last stamp.
+  const quiescentFpsRef = useRef<number | false>(resolveQuiescentFps(quiescentFps));
+  const lastActivityAt  = useRef(0);
   // Whether prefers-reduced-motion is currently in effect — written by the
   // main effect (at mount and on media change) so the palette effect can pick
   // the right swap strategy without owning its own media query.
@@ -239,6 +294,10 @@ export function EdgeAura({
   useEffect(() => {
     savedAtRef.current = savedAt;
   }, [savedAt]);
+
+  useEffect(() => {
+    quiescentFpsRef.current = resolveQuiescentFps(quiescentFps);
+  }, [quiescentFps]);
 
   // ------------------------------------------------------------------
   // Single effect: create engine, drive rAF loop, wire events
@@ -307,6 +366,8 @@ export function EdgeAura({
     // simply starts steady.
     if (kindleOriginRef.current && !reducedMotion) {
       engine.kindle(kindleOriginRef.current.x, kindleOriginRef.current.y);
+      // The entrance wavefront is activity — full rate until it settles.
+      lastActivityAt.current = performance.now();
     }
 
     // rAF loop lifecycle: `running` gates tick's self-rescheduling so the loop
@@ -315,25 +376,51 @@ export function EdgeAura({
     // and flips the flag — nothing fires after stop() in any state.
     let raf = 0;
     let running = false;
+    // Timestamp of the last RENDERED frame. On a throttled (skipped) frame it is
+    // deliberately NOT advanced, so `now - last` keeps accumulating the elapsed
+    // time until the throttle window passes — the eventual step() then receives
+    // the full delta and the physics integrate correctly over the larger step.
     let last = 0;
 
     const tick = (now: number) => {
       if (!running) return;
       raf = requestAnimationFrame(tick);
 
-      const dtMs = now - last;
-      last = now;
-
-      // savedAt pulse detection inside the rAF closure so we don't need a
-      // separate useEffect that would re-register the whole loop.
+      // (a) savedAt pulse detection FIRST — it must run even on a frame we are
+      // about to throttle away, so a save during quiescence pulses promptly
+      // instead of waiting out the throttle window. This lives in the rAF
+      // closure (not a separate useEffect that would re-register the loop). A
+      // fired pulse stamps activity, which clears quiescence in (b) so this very
+      // frame renders.
       const curSavedAt = savedAtRef.current;
       if (curSavedAt !== prevSavedAt.current && curSavedAt !== 0) {
         prevSavedAt.current = curSavedAt;
         if (stateRef.current !== "typing") {
           engine.pulse();
+          lastActivityAt.current = now;
         }
       }
 
+      // (b) quiescence throttle: skip this frame when idle AND no energy/config
+      // input has landed within QUIESCE_AFTER_MS AND the throttle window
+      // (1000/fps) has not yet elapsed since the last rendered frame. `false`
+      // disables it (`fps !== false` is also what narrows fps to a number for
+      // the division). On a skip we return WITHOUT advancing `last`, so `dtMs`
+      // accumulates the skipped time for the next rendered step (see `last`).
+      const fps = quiescentFpsRef.current;
+      const dtMs = now - last;
+      if (
+        fps !== false &&
+        stateRef.current !== "typing" &&
+        now - lastActivityAt.current > QUIESCE_AFTER_MS &&
+        dtMs < 1000 / fps
+      ) {
+        return;
+      }
+
+      // (c) rendered frame: advance `last` and drive the engine with the full
+      // (possibly accumulated) delta.
+      last = now;
       engine.step(dtMs);
       engine.render();
     };
@@ -376,16 +463,21 @@ export function EdgeAura({
 
     // -- Window event wiring --
     const onTap = (e: Event) => {
+      lastActivityAt.current = performance.now();
       const detail = (e as CustomEvent<{ x: number; y: number } | null>).detail;
       engine.tap(detail);
     };
 
     const onKey = (e: Event) => {
+      lastActivityAt.current = performance.now();
       const detail = (e as CustomEvent<{ x: number; y: number }>).detail;
       if (detail) engine.key(detail.x);
     };
 
     const onSavedPulse = () => {
+      // Stamp activity even when the pulse is typing-suppressed below — cheap,
+      // harmless, and it keeps the "an input just arrived" signal honest.
+      lastActivityAt.current = performance.now();
       // Same typing-suppression gate as the savedAt prop path (in tick):
       // an ambient "saved" pulse must not fire over active typing energy,
       // regardless of which channel delivered it.
@@ -393,6 +485,7 @@ export function EdgeAura({
     };
 
     const onResize = () => {
+      lastActivityAt.current = performance.now();
       engine.resize();
       // resize() reallocates the canvas backing store (clearing it); under
       // reduced motion no rAF tick follows, so repaint the static frame here
@@ -462,6 +555,11 @@ export function EdgeAura({
   // need to be torn down and recreated on every typing state transition.
   useEffect(() => {
     engineRef.current?.setTyping(state === "typing");
+    // Both directions are activity: entering "typing" injects energy, and the
+    // idle transition starts palette-rotation deceleration — neither should be
+    // observed through the throttle. (Stamping on the mount run is harmless: it
+    // just gives the ring its full-rate grace window at startup.)
+    lastActivityAt.current = performance.now();
   }, [state]);
 
   // Reactive options: live-tune the engine on `options` prop change. The ref
@@ -486,6 +584,8 @@ export function EdgeAura({
     if (!engine || !partial) return;
     try {
       engine.updateOptions(partial);
+      // A live config change is activity — full rate until it settles.
+      lastActivityAt.current = performance.now();
       // A geometry partial reallocates the tile buffers and clears the canvas
       // (per updateOptions' C5 contract), but no rAF tick follows when the loop
       // is stopped — under reduced motion, while inactive, or on a hidden tab —
@@ -531,6 +631,10 @@ export function EdgeAura({
       } else {
         engine.setPalette(palette, { crossfadeMs: 350 });
       }
+      // The 350 ms crossfade must run at full rate; the QUIESCE_AFTER_MS margin
+      // covers it. (Under reduced motion there is no loop, so this is a no-op
+      // for throttling — harmless.)
+      lastActivityAt.current = performance.now();
     } catch (err) {
       // Decorative overlay: a runtime-invalid palette keeps the current one
       // instead of unmounting the host tree (an error thrown during a commit
@@ -567,6 +671,9 @@ export function EdgeAura({
         if (!engine) return;
         if (reducedMotionRef.current) return;
         engine.kindle(x, y);
+        // Only stamp when the kindle actually fired (past the guards above) —
+        // the reveal wavefront must render at full rate until it settles.
+        lastActivityAt.current = performance.now();
       },
     }),
     [],

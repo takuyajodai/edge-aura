@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- React `quiescentFps` prop (reactive, default `20`) — throttles the rAF loop
+  to a reduced frame rate while the effect is "quiescent" (idle with no energy
+  or config input for ~5 s). At the idle rotation the per-frame delta is far
+  below the perceptual threshold, so the throttle is visually indistinguishable
+  from full rate while roughly halving rAF wakeups (more on 120 Hz panels) —
+  purely a battery / low-end-hardware win. Any input (tap, key, save pulse, a
+  `state` / `palette` / `options` change, a kindle, or a resize) restores full
+  rate for a grace window; numeric values are clamped up to a 5 fps floor, and
+  `false` opts out entirely. The engine is unchanged — this is an adapter-only
+  scheduling change (the reduced-motion / hidden-tab / `active={false}` paths,
+  which stop the loop outright, are untouched).
 - React adapter now accepts a `ref` (React 19 `ref`-as-prop) exposing an
   `EdgeAuraHandle` with `kindle(x, y)` — fire the entrance reveal imperatively
   after mount (e.g. on a triggering click, before/while a route transition is
