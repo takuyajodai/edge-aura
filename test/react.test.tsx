@@ -127,10 +127,14 @@ describe("mount", () => {
 describe("unmount", () => {
   it("cancels the pending rAF, removes listeners, and destroys the engine", () => {
     const removed: string[] = [];
+    // Record AND call through — a swallowing spy would leak live listeners
+    // onto window, polluting every later test that dispatches these events.
+    const origRemove = window.removeEventListener.bind(window);
     const removeSpy = vi
       .spyOn(window, "removeEventListener")
-      .mockImplementation((type) => {
+      .mockImplementation((type, listener, opts) => {
         removed.push(type as string);
+        origRemove(type, listener, opts);
       });
 
     const { unmount } = render(<EdgeAura />);
@@ -316,14 +320,37 @@ describe("visibility gating", () => {
 
   it("removes the visibilitychange listener on unmount", () => {
     const removed: string[] = [];
+    // Record AND call through (see the window.removeEventListener spy above).
+    const origRemove = document.removeEventListener.bind(document);
     const removeSpy = vi
       .spyOn(document, "removeEventListener")
-      .mockImplementation((type) => {
+      .mockImplementation((type, listener, opts) => {
         removed.push(type as string);
+        origRemove(type, listener, opts);
       });
     const { unmount } = render(<EdgeAura />);
     unmount();
     expect(removed).toContain("visibilitychange");
     removeSpy.mockRestore();
+  });
+});
+
+describe("saved-pulse event channel", () => {
+  it("pulses on the event while idle", () => {
+    render(<EdgeAura state="idle" />);
+    window.dispatchEvent(new CustomEvent("aura:saved-pulse"));
+    expect(mockEngine.pulse).toHaveBeenCalledTimes(1);
+  });
+
+  it("suppresses the event while typing — same gate as the savedAt prop path", () => {
+    const { rerender } = render(<EdgeAura state="typing" />);
+    window.dispatchEvent(new CustomEvent("aura:saved-pulse"));
+    expect(mockEngine.pulse).not.toHaveBeenCalled();
+
+    // Back to idle: the gate reopens for subsequent events (no queued pulse).
+    rerender(<EdgeAura state="idle" />);
+    expect(mockEngine.pulse).not.toHaveBeenCalled();
+    window.dispatchEvent(new CustomEvent("aura:saved-pulse"));
+    expect(mockEngine.pulse).toHaveBeenCalledTimes(1);
   });
 });

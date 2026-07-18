@@ -349,7 +349,10 @@ export function EdgeAura({
     };
 
     const onSavedPulse = () => {
-      engine.pulse();
+      // Same typing-suppression gate as the savedAt prop path (in tick):
+      // an ambient "saved" pulse must not fire over active typing energy,
+      // regardless of which channel delivered it.
+      if (stateRef.current !== "typing") engine.pulse();
     };
 
     const onResize = () => {
