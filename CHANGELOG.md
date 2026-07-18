@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.6.0] - 2026-07-18
 
 ### Added
 
@@ -26,6 +26,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in flight), instead of only at mount via `kindleOrigin`. One-shot, a no-op
   under `prefers-reduced-motion` and before the engine exists / after unmount,
   and independent of `kindleOrigin` (which stays mount-time-only).
+
+### Fixed
+
+- The `${prefix}:saved-pulse` CustomEvent now honors the same
+  typing-suppression gate as the `savedAt` prop path — a save event arriving
+  while `state === "typing"` no longer pulses over the active typing energy.
+  Consumers migrating from the prop to the event channel keep the documented
+  "ambient pulse" behavior on both routes.
 
 ## [0.5.3] - 2026-07-13
 
