@@ -1,6 +1,12 @@
 "use client";
 
-import { useEffect, useRef, type CSSProperties } from "react";
+import {
+  useEffect,
+  useImperativeHandle,
+  useRef,
+  type CSSProperties,
+  type Ref,
+} from "react";
 import {
   createAuraEngine,
   type AuraEngine,
@@ -10,6 +16,27 @@ import {
 import { EDGE_AURA_PALETTES, type EdgeAuraPaletteName } from "./palettes";
 
 export type AuraState = "idle" | "typing";
+
+/**
+ * Imperative handle exposed through the `ref` prop. Lets SPA consumers fire the
+ * entrance kindle at gesture time — e.g. before/while a route transition is
+ * still in flight — instead of only at mount via `kindleOrigin`.
+ */
+export interface EdgeAuraHandle {
+  /**
+   * One-shot entrance reveal from a viewport point: the SAME steady ring is
+   * revealed by a wavefront spreading from `(x, y)` and settling into its exact
+   * steady state (identical to the `kindleOrigin` mount path — one renderer, no
+   * separate activation). Coordinates are viewport pixels (e.g. a click's
+   * `clientX` / `clientY`).
+   *
+   * No-op under `prefers-reduced-motion` (the static frame must stay calm —
+   * mirrors the mount path's reduced-motion skip). No-op before the engine
+   * exists or after unmount. Independent of `kindleOrigin`: both may be used,
+   * and `kindleOrigin` stays mount-time-only — this neither reads nor alters it.
+   */
+  kindle(x: number, y: number): void;
+}
 
 export interface EdgeAuraProps {
   /** Current activity state. Default "idle". */
@@ -76,6 +103,15 @@ export interface EdgeAuraProps {
    * Set `zIndex` here to control stacking against your app's layers.
    */
   style?: CSSProperties;
+  /**
+   * Imperative handle for firing the entrance kindle after mount (React 19
+   * `ref`-as-prop — no forwardRef). Attach a `Ref<EdgeAuraHandle>` and call
+   * `ref.current?.kindle(x, y)` to trigger the reveal at the moment of a
+   * gesture (a click that starts a route transition), rather than at mount via
+   * `kindleOrigin`. See `EdgeAuraHandle` for the exact semantics (one-shot,
+   * reduced-motion-safe, no-op after unmount, independent of `kindleOrigin`).
+   */
+  ref?: Ref<EdgeAuraHandle>;
 }
 
 // Zero-config defaults: a full-viewport, click-through overlay. The user's
@@ -171,6 +207,7 @@ export function EdgeAura({
   kindleOrigin = null,
   className,
   style,
+  ref,
 }: EdgeAuraProps) {
   const canvasRef   = useRef<HTMLCanvasElement>(null);
   const engineRef   = useRef<AuraEngine | null>(null);
@@ -516,6 +553,24 @@ export function EdgeAura({
     activeRef.current = active;
     syncLoopRef.current?.();
   }, [active]);
+
+  // Imperative kindle handle. The closure reads only stable refs, so the handle
+  // object is built once (empty deps). It mirrors the mount-path gate exactly:
+  // no engine yet / after unmount → engineRef is null (no-op); reduced motion →
+  // bail before touching the engine so the static frame stays calm. It does not
+  // touch kindleOrigin — that stays mount-time-only.
+  useImperativeHandle(
+    ref,
+    (): EdgeAuraHandle => ({
+      kindle(x, y) {
+        const engine = engineRef.current;
+        if (!engine) return;
+        if (reducedMotionRef.current) return;
+        engine.kindle(x, y);
+      },
+    }),
+    [],
+  );
 
   return (
     <div

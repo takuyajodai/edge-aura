@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- React adapter now accepts a `ref` (React 19 `ref`-as-prop) exposing an
+  `EdgeAuraHandle` with `kindle(x, y)` — fire the entrance reveal imperatively
+  after mount (e.g. on a triggering click, before/while a route transition is
+  in flight), instead of only at mount via `kindleOrigin`. One-shot, a no-op
+  under `prefers-reduced-motion` and before the engine exists / after unmount,
+  and independent of `kindleOrigin` (which stays mount-time-only).
+
 ## [0.5.3] - 2026-07-13
 
 ### Changed

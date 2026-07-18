@@ -5,7 +5,7 @@
  * listener cleanup, and reactive props — without exercising canvas rendering
  * (that is engine.test.ts territory).
  */
-import { StrictMode } from "react";
+import { createRef, StrictMode } from "react";
 import { cleanup, render } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EDGE_AURA_PALETTES } from "../src/palettes";
@@ -38,7 +38,7 @@ const { mockEngine, createAuraEngine } = vi.hoisted(() => {
 vi.mock("../src/engine", () => ({ createAuraEngine }));
 
 // Imported AFTER the mock declaration so ./engine resolves to the mock.
-import { EdgeAura } from "../src/react";
+import { EdgeAura, type EdgeAuraHandle } from "../src/react";
 
 // ---------------------------------------------------------------------------
 // Controllable environment: recording rAF + prefers-reduced-motion switch.
@@ -332,6 +332,34 @@ describe("visibility gating", () => {
     unmount();
     expect(removed).toContain("visibilitychange");
     removeSpy.mockRestore();
+  });
+});
+
+describe("imperative kindle handle", () => {
+  it("forwards ref.current.kindle(x, y) to engine.kindle with the same args", () => {
+    const ref = createRef<EdgeAuraHandle>();
+    render(<EdgeAura ref={ref} />);
+    ref.current!.kindle(123, 456);
+    expect(mockEngine.kindle).toHaveBeenCalledTimes(1);
+    expect(mockEngine.kindle).toHaveBeenCalledWith(123, 456);
+  });
+
+  it("is a no-op under prefers-reduced-motion — same gate as the mount path", () => {
+    prmMatches = true;
+    const ref = createRef<EdgeAuraHandle>();
+    render(<EdgeAura ref={ref} />);
+    ref.current!.kindle(10, 20);
+    expect(mockEngine.kindle).not.toHaveBeenCalled();
+  });
+
+  it("does not throw or reach the engine when called after unmount", () => {
+    const ref = createRef<EdgeAuraHandle>();
+    const { unmount } = render(<EdgeAura ref={ref} />);
+    // Retain the handle past unmount — engineRef is nulled in the cleanup.
+    const handle = ref.current!;
+    unmount();
+    expect(() => handle.kindle(5, 5)).not.toThrow();
+    expect(mockEngine.kindle).not.toHaveBeenCalled();
   });
 });
 

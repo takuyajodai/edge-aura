@@ -78,6 +78,30 @@ Props (all optional):
 | `kindleOrigin` | `{x,y} \| null` | `null` | One-time entrance: the steady ring is revealed by a wavefront spreading from this viewport point and settles into its exact steady state (the post-entrance frame is byte-identical to steady). `null` → start steady; skipped under `prefers-reduced-motion` |
 | `className` | `string` | — | Extra class name(s) appended to the wrapper's `edge-aura` class |
 | `style` | `React.CSSProperties` | — | Merged onto the wrapper after the built-in defaults (every default overridable); set `zIndex` here |
+| `ref` | `React.Ref<EdgeAuraHandle>` | — | Imperative handle (React 19 `ref`-as-prop). Exposes `kindle(x, y)` to fire the entrance reveal after mount — see below |
+
+#### Imperative `kindle` (ref)
+
+`kindleOrigin` is read once at mount, which fits when `<EdgeAura>` mounts *on*
+the destination page. For the opposite pattern — start the reveal at the moment
+of the triggering click, before/while a route transition is still in flight —
+attach a `ref` and call `kindle(x, y)` (viewport coordinates):
+
+```tsx
+import { useRef } from "react";
+import { EdgeAura, type EdgeAuraHandle } from "edge-aura/react";
+
+const auraRef = useRef<EdgeAuraHandle>(null);
+
+// on the triggering click, possibly before the destination route exists:
+<a onClick={(e) => auraRef.current?.kindle(e.clientX, e.clientY)} href="/next">…</a>
+<EdgeAura ref={auraRef} />
+```
+
+`kindle` is one-shot and mirrors the mount path's gates: it's a no-op under
+`prefers-reduced-motion` (the static frame stays calm) and before the engine
+exists or after unmount. It's independent of `kindleOrigin` — both may be used,
+and `kindleOrigin` stays mount-time-only.
 
 ### Vanilla
 
